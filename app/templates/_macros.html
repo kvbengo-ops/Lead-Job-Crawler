@@ -1,0 +1,24 @@
+{# Pieces shared by several pages. Import with: {% from "_macros.html" import score, chips, alert %} #}
+
+{% macro score(value, size='') -%}
+{%- if value is none -%}
+<span class="score {{ size }}" title="Not scored yet">–</span>
+{%- else -%}
+<span class="score {{ size }} {{ 'high' if value >= 70 else 'mid' if value >= 40 else '' }}" style="--s:{{ '%.0f'|format(value) }}" title="Score {{ '%.0f'|format(value) }} of 100">{{ '%.0f'|format(value) }}</span>
+{%- endif -%}
+{%- endmacro %}
+
+{% macro chips(o, needs_review=none, passed=none) -%}
+{%- set needs_review = o.needs_review if needs_review is none else needs_review -%}
+{%- set passed = o.passed if passed is none else passed -%}
+{% if o.kind %}<span class="chip primary">{{ o.kind }}</span>{% endif %}
+{% if o.status == 'shortlisted' %}<span class="chip good">{{ icon('star') }}shortlisted</span>
+{% elif o.status == 'pending_evaluation' %}<span class="chip warn">{{ icon('clock') }}pending evaluation</span>
+{% elif o.status == 'ignored' %}<span class="chip">ignored</span>{% endif %}
+{% if needs_review %}<span class="chip warn">{{ icon('flag') }}needs review</span>{% endif %}
+{% if passed == 0 %}<span class="chip bad">rejected</span>{% endif %}
+{%- endmacro %}
+
+{% macro alert(text, kind='info') -%}
+{% if text %}<div class="alert {{ kind }}" role="{{ 'alert' if kind == 'error' else 'status' }}">{{ icon({'success': 'check', 'error': 'alert', 'warn': 'alert'}.get(kind, 'info')) }}<div>{{ text }}</div></div>{% endif %}
+{%- endmacro %}

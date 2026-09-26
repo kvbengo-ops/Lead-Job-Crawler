@@ -1,0 +1,75 @@
+{% extends "base.html" %}
+{% from "_macros.html" import alert %}
+{% set active = 'sources' %}
+{% block title %}Sources{% endblock %}
+{% block content %}
+<header class="page-head">
+  <div>
+    <h1>Crawler sources</h1>
+    <p>Job boards, feeds, and pages the scheduled crawler checks for new posts. Only add sites that allow it.</p>
+  </div>
+</header>
+{% if saved %}{{ alert('Source list saved.', 'success') }}{% endif %}
+{{ alert(error, 'error') }}
+
+<div class="grid split">
+  <section class="card" aria-labelledby="list-title">
+    <div class="card-head"><h2 id="list-title">Your sources</h2><span class="muted small">{{ sources|length }} configured</span></div>
+    {% if sources %}
+    <ul class="items">
+      {% for source in sources %}
+      <li class="item">
+        <span class="muted">{{ icon('rss' if source.kind == 'rss' else 'list' if source.kind in ('greenhouse', 'lever') else 'file') }}</span>
+        <div class="body">
+          <span class="title">{{ source.name or source.board or source.url }}</span> <span class="chip">{{ source.kind }}</span>
+          <div class="meta" style="overflow-wrap:anywhere">{{ source.url or ('Board: ' ~ source.board) }} · up to {{ source.max_runs_per_day or 3 }} runs a day</div>
+        </div>
+        <form class="inline" method="post" action="/sources/{{ loop.index0 }}/delete">
+          <button class="icon ghost danger" title="Delete" aria-label="Delete {{ source.name or source.board or source.url }}">{{ icon('trash') }}</button>
+        </form>
+      </li>
+      {% endfor %}
+    </ul>
+    {% else %}
+    <div class="empty">
+      {{ icon('rss') }}
+      <h2>No sources yet</h2>
+      <p>Add one on the right, and the crawler will find new opportunities for you.</p>
+    </div>
+    {% endif %}
+  </section>
+
+  <section class="card" aria-labelledby="add-title">
+    <h2 id="add-title">Add a source</h2>
+    <form method="post" action="/sources">
+      <div class="field"><label for="kind">Type</label>
+        <select id="kind" name="kind" style="width:100%">
+          <option value="page">One page</option><option value="rss">RSS or Atom feed</option>
+          <option value="greenhouse">Greenhouse board</option><option value="lever">Lever board</option>
+        </select></div>
+      <div class="field" id="url-field"><label for="url">URL</label>
+        <input id="url" name="url" type="url" placeholder="https://example.com/jobs.rss"></div>
+      <div class="field" id="board-field"><label for="board">Board name</label>
+        <input id="board" name="board" type="text" placeholder="company-board-name">
+        <p class="help">The part after boards.greenhouse.io/ or jobs.lever.co/.</p></div>
+      <div class="field"><label for="name">Display name <span class="muted">(optional)</span></label>
+        <input id="name" name="name" type="text" placeholder="Example jobs"></div>
+      <div class="field"><label for="max_runs_per_day">Maximum runs per day</label>
+        <input id="max_runs_per_day" name="max_runs_per_day" type="number" min="1" value="3"></div>
+      <div class="form-actions"><button class="primary">{{ icon('plus') }}Add source</button></div>
+    </form>
+  </section>
+</div>
+<script>
+  // Show only the field the chosen type uses; without JavaScript both stay visible.
+  (function () {
+    var kind = document.getElementById("kind");
+    function sync() {
+      var board = kind.value === "greenhouse" || kind.value === "lever";
+      document.getElementById("url-field").hidden = board;
+      document.getElementById("board-field").hidden = !board;
+    }
+    kind.addEventListener("change", sync); sync();
+  })();
+</script>
+{% endblock %}

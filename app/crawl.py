@@ -4,7 +4,8 @@ sources.json is a list of sources:
   {"kind": "greenhouse", "board": "acme"}                   Greenhouse job-board API (boards.greenhouse.io/acme)
   {"kind": "lever", "board": "acme"}                        Lever postings API (jobs.lever.co/acme)
   {"kind": "rss", "url": "https://example.com/jobs.rss"}    RSS or Atom feed
-  {"kind": "page", "url": "https://example.com/job/123"}    one posting page, processed once
+  {"kind": "page", "url": "https://example.com/job/123"}    one posting page, processed once; a page that
+                                                            lists jobs is re-read each run and new jobs added
 Optional on each: "name" (shown in logs) and "max_runs_per_day" (default 3).
 
 API and feed items are read from the structured data directly; linked pages are not fetched.
@@ -23,15 +24,14 @@ from urllib.parse import urlsplit
 import feedparser
 import httpx
 
-from . import db, pipeline
-from .extract import FetchError, guess_remote, fetch, finish, html_to_text, make_client
+from . import db, extract, pipeline
+from .extract import FetchError, ListingPage, guess_remote, fetch, finish, html_to_text, make_client
 
 SOURCES_PATH = db.ROOT / "sources.json"
 LOCK_PATH = db.ROOT / "data" / "crawl.lock"
 STALE_LOCK_SECONDS = 2 * 60 * 60
 KINDS = ("greenhouse", "lever", "rss", "page")
 DEFAULT_RUNS_PER_DAY = 3
-SAME_HOST_DELAY = 1.0  # seconds between requests to one host
 MAX_LIST_BYTES = 50 * 1024 * 1024  # a big company's whole job list can exceed the 5 MB page limit
 GREENHOUSE = "https://boards-api.greenhouse.io/v1/boards/{}/jobs?content=true"
 LEVER = "https://api.lever.co/v0/postings/{}?mode=json"
@@ -130,6 +130,7 @@ def lever_items(source: dict, data) -> list[tuple[str, dict]]:
         items.append((str(p["id"]), _record(
             source, source_url=p.get("hostedUrl"), title=p.get("text"), company=source["name"],
             description=description, location=(p.get("categories") or {}).get("location"), remote=remote,
+            employment_types=(p.get("categories") or {}).get("commitment"),  # e.g. "Full-time", "Contract"
             salary_min=lo, salary_max=hi, currency=currency, published_at=p.get("createdAt"), warnings=warnings)))
     return items
 
@@ -254,7 +255,7 @@ def _run() -> int:
                 print(f"skip {source['name']}: already fetched {state['runs_today']} time(s) today")
                 continue
             host = urlsplit(source["url"]).netloc
-            wait = SAME_HOST_DELAY - (time.monotonic() - last_request.get(host, -1e9))
+            wait = extract.SAME_HOST_DELAY - (time.monotonic() - last_request.get(host, -1e9))
             if wait > 0:
                 time.sleep(wait)
             try:
@@ -271,8 +272,18 @@ def _run() -> int:
             for item_id, record in items:
                 if db.is_seen(source["key"], item_id):
                     continue
+                if record is None and item_id != source.get("url"):
+                    time.sleep(extract.SAME_HOST_DELAY)  # a job found on a list page: same site as the last request
                 try:
                     oid, duplicate = pipeline.process(op=record) if record else pipeline.process(url=item_id)
+                except ListingPage as listing:
+                    if item_id == source.get("url"):
+                        # The page source is a list of jobs: this loop goes on to its jobs. The list itself is
+                        # never marked seen, so the next run reads it again and picks up new jobs.
+                        items.extend((url, None) for url, _ in listing.links)
+                        continue
+                    run_log["errors"].append(f"{source['name']}: {item_id}: {listing}")
+                    continue
                 except (FetchError, ValueError) as e:
                     run_log["errors"].append(f"{source['name']}: {item_id}: {e}")  # not marked seen: retried next run
                     print(f"error {item_id}: {e}")

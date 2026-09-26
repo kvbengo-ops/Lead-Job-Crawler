@@ -156,3 +156,29 @@ def test_oversized_page_is_refused(web, monkeypatch):
     routes["https://site.example/big"] = httpx.Response(200, text="<p>" + "x" * 100 + "</p>")
     with pytest.raises(FetchError, match="larger than"):
         from_url("https://site.example/big")
+
+
+# --- job board list pages ------------------------------------------------------------
+
+LIST_PAGE = """<html><title>Jobs</title><body><nav><a href="/jobs/search/c/python">Python</a></nav>
+<main>{}</main></body></html>"""
+
+
+def list_page(*slugs):
+    cards = "".join(f'<div><a href="/board/job/{s}">See More</a> <a href="/board/job/{s}#apply">Apply</a></div>'
+                    for s in slugs)
+    return LIST_PAGE.format(cards)
+
+
+def test_list_page_is_recognised_and_named_from_urls():
+    with pytest.raises(extract.ListingPage) as caught:
+        from_html(list_page("python-dev-123456", "data-engineer-234567", "qa-tester-345678"), "https://b.example/jobs")
+    assert caught.value.links == [("https://b.example/board/job/python-dev-123456", "Python dev"),
+                                  ("https://b.example/board/job/data-engineer-234567", "Data engineer"),
+                                  ("https://b.example/board/job/qa-tester-345678", "Qa tester")]
+
+
+def test_job_page_with_related_jobs_is_still_one_job():
+    html = list_page("a-111111", "b-222222", "c-333333").replace("<main>", "<main><p>Python developer wanted</p>")
+    assert "Python developer wanted" in from_html(html, "https://b.example/board/job/python-dev-999999")["description"]
+    assert from_html(list_page("a-111111", "b-222222"), "https://b.example/jobs")["title"] == "Jobs"  # 2 links: a page

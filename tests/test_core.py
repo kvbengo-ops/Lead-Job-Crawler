@@ -4,12 +4,19 @@ import pytest
 
 from app import db
 from app.extract import from_text
-from app.normalize import canonical_url
+from app.normalize import canonical_url, clean_title
 
 @pytest.fixture(autouse=True)
 def isolated_db(tmp_path, monkeypatch):
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "app.db")
     db.init()
+
+
+def test_clean_title_drops_site_suffix_and_entities():
+    url = "https://www.onlinejobs.ph/jobseekers/job/1733026"
+    assert clean_title("AI &amp; IT Specialist 1733026 - OnlineJobs.ph", url) == "AI & IT Specialist"
+    assert clean_title("Backend - Python", url) == "Backend - Python"  # suffix is not the site: kept
+
 
 def test_canonical_url_removes_tracking():
     assert canonical_url("HTTPS://Example.COM/jobs/1/?utm_source=x&ref=abc&x=1#top") == "https://example.com/jobs/1?x=1"

@@ -1,9 +1,22 @@
 {
   "name": "Your Name",
   "headline": "Python developer",
-  "skills": ["python", "fastapi", "sql", "web scraping", "automation"],
-  "services": ["backend development", "data pipelines"],
-  "work_modes": ["remote"],
+  "experience": "",
+  "skills": [
+    "python",
+    "fastapi",
+    "sql",
+    "web scraping",
+    "automation"
+  ],
+  "services": [
+    "backend development",
+    "data pipelines"
+  ],
+  "work_modes": [
+    "remote"
+  ],
+  "employment_types": [],
   "preferred_locations": [],
   "excluded_locations": [],
   "min_salary": null,
@@ -15,9 +28,13 @@
     "relevance": 60,
     "skills": 20,
     "salary": 10,
-    "location": 10
+    "location": 10,
+    "employment": 10
   },
-  "reject_types": ["spam", "irrelevant"],
+  "reject_types": [
+    "spam",
+    "irrelevant"
+  ],
   "question_version": "2026-09-25.1",
   "questions": {
     "type": {
@@ -37,7 +54,12 @@
       "type": "score",
       "state": "description",
       "instructions": "How well does this match someone offering these skills: {skills}; services: {services}?",
-      "criteria": ["no match", "weak match", "partial match", "strong match"]
+      "criteria": [
+        "no match",
+        "weak match",
+        "partial match",
+        "strong match"
+      ]
     },
     "work_mode": {
       "type": "choice",

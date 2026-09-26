@@ -1,0 +1,3 @@
+FROM qwen3:4b
+SYSTEM "You are a helpful assistant. Keep your internal reasoning extremely brief — 1-2 sentences max. Be direct."
+PARAMETER num_ctx 2048

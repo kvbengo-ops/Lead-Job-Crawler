@@ -10,12 +10,32 @@ from .laya_client import evaluate
 from .normalize import canonical_url, normalize
 from .score import score
 
+# The profile and resume live in the database. These two files are where older versions kept them; each is
+# imported once, then renamed to *.imported so it is neither read again nor lost.
 PROFILE_PATH = db.ROOT / "profile.json"
+RESUME_PATH = db.ROOT / "data" / "resume.txt"
+EXAMPLE_PROFILE_PATH = db.ROOT / "profile.example.json"  # shared template, used until a profile is saved
+
+
+def _import_file(path, save) -> None:
+    if path.exists():
+        # utf-8-sig: Windows editors often save a BOM, which plain utf-8 json parsing rejects.
+        save(path.read_text(encoding="utf-8-sig"))  # a bad file raises here and stays where it is
+        path.replace(path.with_name(path.name + ".imported"))
 
 
 def load_profile() -> dict:
-    # utf-8-sig: Windows editors often save a BOM, which plain utf-8 json parsing rejects.
-    return json.loads(PROFILE_PATH.read_text(encoding="utf-8-sig"))
+    if db.get_profile() is None:
+        _import_file(PROFILE_PATH, lambda text: db.save_profile(json.loads(text)))
+    profile = db.get_profile()
+    return profile if profile is not None else json.loads(EXAMPLE_PROFILE_PATH.read_text(encoding="utf-8-sig"))
+
+
+def load_resume() -> str:
+    if db.get_resume() is None:
+        _import_file(RESUME_PATH, db.save_resume)
+    resume = db.get_resume()
+    return resume["text"] if resume else ""
 
 
 def process(text: str | None = None, url: str | None = None, op: dict | None = None) -> tuple[int, bool]:

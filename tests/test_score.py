@@ -76,16 +76,41 @@ def test_laya_error_needs_review_and_scores_neutral_relevance():
 
 
 def test_perfect_match_scores_100():
-    result = score(op(remote=True, salary_max=90000, currency="USD"), ev(relevance=1.0), PROFILE)
+    profile = {**PROFILE, "employment_types": ["full_time"]}
+    result = score(op(remote=True, salary_max=90000, currency="USD", employment_types=["full_time"]),
+                   ev(relevance=1.0), profile)
     assert result["passed"] is True
-    assert result["components"] == {"salary": 1.0, "relevance": 1.0, "skills": 1.0, "location": 1.0}
+    assert result["components"] == {"salary": 1.0, "relevance": 1.0, "skills": 1.0, "location": 1.0,
+                                    "employment": 1.0}
     assert result["score"] == 100.0
 
 
 def test_weighted_average():
-    # relevance 0.5*60 + skills 1*20 + salary unknown 0.5*10 + location unclear 0.5*10 = 60
+    # relevance 0.5*60 + skills 1*20 + salary unknown 0.5*10 + location unclear 0.5*10 + employment no pref 0.5*10
+    # = 65 of 110 weight
     result = score(op(), ev(relevance=0.5), PROFILE)
-    assert result["score"] == 60.0
+    assert result["score"] == round(65 / 110 * 100, 1)
+
+
+@pytest.mark.parametrize("wanted, offered, value, reason", [
+    ([], ["full_time"], 0.5, "No employment type preference set"),
+    (["full_time"], [], 0.5, "Employment type not stated"),
+    (["full_time", "flexible_hours"], ["part_time", "flexible_hours"], 1.0,
+     "Employment type flexible hours matches your preference"),
+    (["full_time"], ["part_time"], 0.0, "Employment type part time is not in your preferences (full time)"),
+])
+def test_employment_type(wanted, offered, value, reason):
+    result = score(op(employment_types=offered), ev(), {**PROFILE, "employment_types": wanted})
+    assert result["components"]["employment"] == value
+    assert reason in result["reasons"]
+    assert result["passed"] is True  # a mismatch lowers the score but never rejects
+
+
+def test_profile_weights_without_employment_still_count_it():
+    profile = {**PROFILE, "employment_types": ["full_time"], "score_weights": {"relevance": 60}}
+    matched = score(op(employment_types=["full_time"]), ev(relevance=0.5), profile)["score"]
+    mismatched = score(op(employment_types=["part_time"]), ev(relevance=0.5), profile)["score"]
+    assert matched > mismatched
 
 
 def test_remote_false_means_unknown_not_onsite():

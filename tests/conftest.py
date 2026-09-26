@@ -4,7 +4,7 @@ import json
 import httpx
 import pytest
 
-from app import crawl, db, extract, pipeline
+from app import crawl, db, extract, ollama_client, pipeline
 
 PROFILE = {
     "name": "Test User",
@@ -56,13 +56,43 @@ def isolated(tmp_path, monkeypatch):
     profile_path = tmp_path / "profile.json"
     profile_path.write_text(json.dumps(PROFILE), encoding="utf-8")
     monkeypatch.setattr(pipeline, "PROFILE_PATH", profile_path)
+    monkeypatch.setattr(pipeline, "RESUME_PATH", tmp_path / "resume.txt")  # never import the real resume
     monkeypatch.setattr(crawl, "SOURCES_PATH", tmp_path / "sources.json")
     monkeypatch.setattr(crawl, "LOCK_PATH", tmp_path / "crawl.lock")
-    monkeypatch.setattr(crawl, "SAME_HOST_DELAY", 0)
+    monkeypatch.setattr(extract, "SAME_HOST_DELAY", 0)
     monkeypatch.setattr(extract, "_robots", {})
     db.init()
     # No test may reach the real network unless it installs routes with the `web` fixture.
     install_web(monkeypatch, {})
+    # Ollama looks offline unless a test installs a fake with the `ollama` fixture.
+    install_ollama(monkeypatch, None)
+
+
+def install_ollama(monkeypatch, handler):
+    """handler(request) -> httpx.Response, or None to simulate Ollama not running. Returns the request list."""
+    requests = []
+
+    def respond(request):
+        requests.append(request)
+        if handler is None:
+            raise httpx.ConnectError("connection refused", request=request)
+        return handler(request)
+
+    monkeypatch.setattr(ollama_client, "make_client",
+                        lambda: httpx.Client(transport=httpx.MockTransport(respond)))
+    return requests
+
+
+@pytest.fixture
+def ollama(monkeypatch):
+    """A fake Ollama that answers with `ollama.reply` (default: a short draft)."""
+    class Fake:
+        reply = {"model": "qwen2.5:3b", "message": {"role": "assistant", "content": "Subject: Hi\n\nHello there.\n\nBest,\nTest User"},
+                 "done": True, "done_reason": "stop"}
+        status = 200
+    fake = Fake()
+    fake.requests = install_ollama(monkeypatch, lambda request: httpx.Response(fake.status, json=fake.reply))
+    return fake
 
 
 @pytest.fixture

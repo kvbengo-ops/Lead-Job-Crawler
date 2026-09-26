@@ -169,3 +169,21 @@ def test_bad_sources_file_is_reported(sources, message, laya):
 def test_no_sources_file_is_fine(laya):
     assert crawl.run() == 0
     assert db.last_run()["sources_fetched"] == 0
+
+
+def test_list_page_source_adds_its_jobs_and_new_ones_later(web, laya):
+    from tests.test_extract import list_page
+    routes, _ = web
+    html = lambda: httpx.Response(200, text=list_page(*slugs), headers={"content-type": "text/html"})
+    slugs = ["python-dev-111111", "sql-dev-222222", "go-dev-333333"]
+    routes["https://site.example/jobs"] = lambda request: html()
+    for n, slug in enumerate(slugs + ["rust-dev-444444"]):
+        routes[f"https://site.example/board/job/{slug}"] = httpx.Response(
+            200, text=f"<html><title>Job {n}</title><body><main><p>Python work</p></main></body></html>",
+            headers={"content-type": "text/html"})
+    write_sources([{"kind": "page", "url": "https://site.example/jobs", "max_runs_per_day": 5}])
+    crawl.run()
+    assert sorted(titles()) == ["Job 0", "Job 1", "Job 2"] and db.last_run()["errors"] == []
+    slugs.append("rust-dev-444444")
+    crawl.run()
+    assert sorted(titles()) == ["Job 0", "Job 1", "Job 2", "Job 3"] and db.last_run()["new_items"] == 1

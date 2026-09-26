@@ -9,7 +9,7 @@ import json
 import re
 from html import unescape
 from html.parser import HTMLParser
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 from urllib.robotparser import RobotFileParser
 
 import httpx
@@ -20,6 +20,7 @@ USER_AGENT = "LocalJobCrawler/0.1 (personal job search; runs on one PC)"
 ROBOTS_AGENT = "LocalJobCrawler"
 MAX_BYTES = 5 * 1024 * 1024
 TIMEOUT = 10
+SAME_HOST_DELAY = 1.0  # seconds between requests to one host
 EMAIL = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)*\.[A-Za-z]{2,}")
 # Yearly equivalents, so an hourly rate is never compared with a yearly minimum.
 PER_YEAR = {"HOUR": 2080, "DAY": 260, "WEEK": 52, "MONTH": 12, "YEAR": 1}
@@ -28,6 +29,23 @@ KEY_FIELDS = ("title", "company", "location", "published_at")
 
 class FetchError(Exception):
     """A URL could not be fetched or is not allowed to be fetched."""
+
+
+# A link to one posting: a jobs-like path segment, then a segment with a numeric id, as in /jobs/4567890 or
+# /jobseekers/job/video-editor-1738485. Category and search links have no id, so they don't match.
+# ponytail: a URL heuristic; boards that link jobs as ?id=123 or without a numeric id aren't recognized.
+JOB_LINK = re.compile(r"/(?:jobs?|careers?|positions?|vacanc(?:y|ies)|openings?|postings?)/(?:[^/]+/)*[^/]*\d{4,}[^/]*/?$",
+                      re.I)
+MIN_LISTING_LINKS = 3
+MAX_LISTING_LINKS = 50
+
+
+class ListingPage(Exception):
+    """The URL is a list of jobs, not one posting. `links` is [(url, link text)], one per posting."""
+
+    def __init__(self, url: str, links: list[tuple[str, str]]):
+        super().__init__(f"{url} is a list of {len(links)} jobs, not one job")
+        self.url, self.links = url, links
 
 
 def make_client() -> httpx.Client:
@@ -104,6 +122,8 @@ class _Page(HTMLParser):
         self._main = 0                  # depth inside <main>/<article>
         self._in_title = False
         self._ld = None                 # buffer while inside a JSON-LD script
+        self.links: list[tuple[str, str]] = []  # (href, link text) for every <a href>
+        self._a = None                  # [href, text parts] while inside a link
 
     def handle_starttag(self, tag, attrs):
         a = dict(attrs)
@@ -111,6 +131,8 @@ class _Page(HTMLParser):
             self._ld = []
         if tag == "title" and not self._skipping:
             self._in_title = True
+        if tag == "a" and a.get("href"):
+            self._a = [a["href"], []]
         if tag == "meta":
             key = (a.get("property") or a.get("name") or "").lower()
             if key and a.get("content"):
@@ -137,6 +159,9 @@ class _Page(HTMLParser):
             self._ld = None
         if tag == "title":
             self._in_title = False
+        if tag == "a" and self._a:
+            self.links.append((self._a[0], " ".join("".join(self._a[1]).split())))
+            self._a = None
         if tag in self._skipping:
             # Close up to the matching tag, so a missing end tag inside it can't leave text skipped forever.
             while self._skipping and self._skipping.pop() != tag:
@@ -147,6 +172,8 @@ class _Page(HTMLParser):
             self._text("\n")
 
     def handle_data(self, data):
+        if self._a is not None:
+            self._a[1].append(data)
         if self._ld is not None:
             self._ld.append(data)
         elif self._in_title:
@@ -171,6 +198,24 @@ def html_to_text(html: str) -> str:
     page.feed(html)
     page.close()
     return _join(page.body)
+
+
+def job_links(page: _Page, base_url: str) -> list[tuple[str, str]]:
+    """Links on the page to single postings on the same site, as (url, name). The name comes from the URL's
+    slug when it has one (link texts are often just "See More"), else from the longest link text."""
+    host = urlsplit(base_url).netloc
+    texts: dict[str, list[str]] = {}
+    for href, text in page.links:
+        url = urljoin(base_url, href).split("#")[0]
+        parts = urlsplit(url)
+        if parts.netloc == host and url != base_url and JOB_LINK.search(parts.path):
+            texts.setdefault(url, []).append(text)
+    links = []
+    for url, found in list(texts.items())[:MAX_LISTING_LINKS]:
+        slug = re.sub(r"[-_]?\d{4,}.*$", "", urlsplit(url).path.rstrip("/").rsplit("/", 1)[-1])
+        name = " ".join(re.split(r"[-_]+", slug)).strip().capitalize() or max(found, key=len)
+        links.append((url, name[:120] or url))
+    return links
 
 
 def _looks_like_html(text: str) -> bool:
@@ -292,6 +337,7 @@ def from_html(html: str, source_url: str | None = None) -> dict:
             "company": _name(job.get("hiringOrganization")), "description": description,
             "location": location or ("Remote" if telecommute else None),
             "remote": True if telecommute else guess_remote(description),
+            "employment_types": job.get("employmentType"),  # schema.org, e.g. "FULL_TIME" or a list
             "salary_min": lo, "salary_max": hi, "currency": currency,
             "contact_email": _first_email(description), "published_at": job.get("datePosted"),
             "raw_text": text, "warnings": warnings,
@@ -299,6 +345,12 @@ def from_html(html: str, source_url: str | None = None) -> dict:
         op["extracted_by"] = {k: "jsonld" for k in ("title", "company", "description", "location", "salary_min",
                                                     "salary_max", "currency", "published_at") if op.get(k)}
         return finish(op)
+
+    # No JobPosting data: a page that isn't itself a job link but links to several is a list of jobs.
+    if source_url and not JOB_LINK.search(urlsplit(source_url).path):
+        links = job_links(page, source_url)
+        if len(links) >= MIN_LISTING_LINKS:
+            raise ListingPage(source_url, links)
 
     title = (page.meta.get("og:title") or page.title or "").strip() or None
     description = text or page.meta.get("og:description") or page.meta.get("description") or ""
@@ -334,7 +386,8 @@ def from_text(text: str, source_url: str | None = None) -> dict:
 
 
 def from_url(url: str) -> dict:
-    """Fetch one page (robots.txt permitting) and extract it. Raises FetchError on failure."""
+    """Fetch one page (robots.txt permitting) and extract it. Raises FetchError on failure, and ListingPage
+    when the page is a list of jobs rather than one."""
     r = fetch(url)
     ctype = r.headers.get("content-type", "").lower()
     if ctype and not any(t in ctype for t in ("html", "xml", "text/plain")):

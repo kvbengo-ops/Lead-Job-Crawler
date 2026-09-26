@@ -127,7 +127,7 @@ def test_profile_without_questions_is_an_error_without_calling_laya():
 
     for profile in ({}, {"questions": {}}):
         assert laya_client.evaluate({"description": "x"}, profile, client(handler))["error"] == \
-            "profile.json has no Laya questions"
+            "The profile has no Laya questions"
 
 
 def test_non_json_error_body():

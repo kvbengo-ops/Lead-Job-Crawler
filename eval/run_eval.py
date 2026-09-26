@@ -20,6 +20,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+from app import db, pipeline  # noqa: E402
 from app.laya_client import evaluate  # noqa: E402
 
 CHOICE_QUESTIONS = ("type", "work_mode")
@@ -59,11 +60,15 @@ def pct(n: int, d: int) -> str:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--labels", type=Path, default=ROOT / "eval" / "labels.jsonl")
-    ap.add_argument("--profile", type=Path, default=ROOT / "profile.json")
+    ap.add_argument("--profile", type=Path, help="a profile JSON file (default: the saved profile)")
     ap.add_argument("--report", type=Path, default=ROOT / "eval" / "report.md")
     args = ap.parse_args()
 
-    profile = json.loads(args.profile.read_text(encoding="utf-8-sig"))
+    if args.profile:
+        profile = json.loads(args.profile.read_text(encoding="utf-8-sig"))
+    else:
+        db.init()
+        profile = pipeline.load_profile()
     rows = load_labels(args.labels)
     check_labels(rows, profile)
     threshold = profile.get("confidence_threshold", 0.6)

@@ -35,18 +35,18 @@ def test_javascript_source_url_is_not_linked(client):
 def test_list_filters(client):
     good = add(client, "Python dev\nPython and SQL. Remote.")
     spam = add(client, "Spam\nThis is spam")
-    home = client.get("/").text
+    home = client.get("/opportunities").text
     assert f"/opportunities/{good}" in home and f"/opportunities/{spam}" not in home
-    assert f"/opportunities/{spam}" in client.get("/?rejected=1").text
-    assert f"/opportunities/{good}" not in client.get("/?kind=lead").text
-    assert f"/opportunities/{good}" in client.get("/?kind=job").text
+    assert f"/opportunities/{spam}" in client.get("/opportunities?rejected=1").text
+    assert f"/opportunities/{good}" not in client.get("/opportunities?kind=lead").text
+    assert f"/opportunities/{good}" in client.get("/opportunities?kind=job").text
 
 
 def test_status_buttons(client):
     oid = add(client, "Python dev\nPython")
     client.post(f"/opportunities/{oid}/status", data={"status": "shortlisted"})
     assert db.get_opportunity(oid)["status"] == "shortlisted"
-    assert f"/opportunities/{oid}" in client.get("/?status=shortlisted").text
+    assert f"/opportunities/{oid}" in client.get("/opportunities?status=shortlisted").text
     assert client.post(f"/opportunities/{oid}/status", data={"status": "deleted"}).status_code == 400
 
 
@@ -54,7 +54,7 @@ def test_labels_are_saved_and_exported(client):
     oid = add(client, "Python dev\nPython work")
     client.post(f"/opportunities/{oid}/labels", data={"type": "lead", "work_mode": "remote", "relevant": "no"})
     assert db.get_opportunity(oid)["labels"] == {"type": "lead", "work_mode": "remote", "relevant": False}
-    assert f"/opportunities/{oid}" in client.get("/?kind=lead").text  # your label overrides Laya's type
+    assert f"/opportunities/{oid}" in client.get("/opportunities?kind=lead").text  # your label overrides Laya's type
     lines = client.get("/labels.jsonl").text.splitlines()
     assert [json.loads(line) for line in lines] == [
         {"title": "Python dev", "text": "Python work", "type": "lead", "work_mode": "remote", "relevant": False}]
@@ -127,4 +127,67 @@ def test_last_run_and_new_count_are_shown(client):
     db.record_run({"started_at": "2026-09-26T08:00:00+00:00", "ended_at": "2026-09-26T08:01:00+00:00",
                    "sources_fetched": 2, "new_items": 5, "duplicates": 1, "pending": 0, "errors": ["x: HTTP 500"]})
     page = client.get("/").text
-    assert "5 new, 1 duplicates" in page and "1 error" in page
+    assert "5 new, 1 duplicate," in page and "1 error" in page
+
+
+def test_dashboard_summarises_and_guides_setup(client):
+    empty = client.get("/").text
+    assert "Finish setting up" in empty and "No new opportunities" in empty
+    oid = add(client, "Python dev\nPython and SQL. Remote.")
+    client.post(f"/opportunities/{oid}/status", data={"status": "shortlisted"})
+    page = client.get("/").text
+    assert 'href="/opportunities?status=shortlisted"' in page and "No new opportunities" in page
+    db.set_status(oid, "new")
+    assert f"/opportunities/{oid}" in client.get("/").text  # shown under top new matches
+
+
+def test_quick_status_returns_to_the_list_but_never_off_site(client):
+    oid = add(client, "Python dev\nPython")
+    r = client.post(f"/opportunities/{oid}/status", data={"status": "ignored", "next": "/opportunities?kind=job"},
+                    follow_redirects=False)
+    assert r.headers["location"] == "/opportunities?kind=job" and db.get_opportunity(oid)["status"] == "ignored"
+    for bad in ("//evil.example", "/\evil.example", "https://evil.example"):
+        r = client.post(f"/opportunities/{oid}/status", data={"status": "new", "next": bad}, follow_redirects=False)
+        assert r.headers["location"] == f"/opportunities/{oid}"
+
+
+def test_list_page_offers_its_jobs_and_adds_the_picked_ones(client, web):
+    from tests.test_extract import list_page
+    routes, _ = web
+    routes["https://b.example/jobs"] = httpx.Response(
+        200, text=list_page("python-dev-111111", "sql-dev-222222", "go-dev-333333"), headers={"content-type": "text/html"})
+    for slug in ("python-dev-111111", "sql-dev-222222"):
+        routes[f"https://b.example/board/job/{slug}"] = httpx.Response(
+            200, text=f"<html><title>{slug}</title><body><main><p>Python work</p></main></body></html>",
+            headers={"content-type": "text/html"})
+    page = client.post("/add", data={"url": "https://b.example/jobs"})
+    assert "This page lists 3 jobs" in page.text and "Python dev" in page.text
+    assert db.list_opportunities() == []  # the list page itself isn't stored
+    r = client.post("/add/many", data={"urls": ["https://b.example/board/job/python-dev-111111",
+                                               "https://b.example/board/job/sql-dev-222222"]}, follow_redirects=False)
+    assert r.status_code == 303 and "added=2" in r.headers["location"]
+    assert "Added 2 jobs" in client.get(r.headers["location"]).text
+    page = client.post("/add", data={"url": "https://b.example/jobs"}).text
+    assert page.count("already added") == 2
+    bad = client.post("/add/many", data={"urls": ["https://b.example/board/job/go-dev-333333"]})
+    assert bad.status_code == 422 and "HTTP 404" in bad.text
+
+
+def test_list_hides_spam_and_ignored_unless_asked(client):
+    job = add(client, "Python dev\nPython and SQL. Remote.")
+    junk = add(client, "Job board home\nThousands of jobs")
+    client.post(f"/opportunities/{junk}/labels", data={"type": "spam"})
+    ignored = add(client, "Other dev\nPython")
+    client.post(f"/opportunities/{ignored}/status", data={"status": "ignored"})
+    page = client.get("/opportunities").text
+    assert f"/opportunities/{job}" in page and f"/opportunities/{junk}\"" not in page and f"/opportunities/{ignored}\"" not in page
+    assert f"/opportunities/{junk}\"" in client.get("/opportunities?rejected=1").text
+    assert f"/opportunities/{ignored}\"" in client.get("/opportunities?status=ignored").text
+
+
+def test_delete_removes_opportunity_and_its_drafts(client):
+    oid = add(client, "Python dev\nPython")
+    client.post(f"/opportunities/{oid}/draft/job_application", data={"content": "Hi"})
+    r = client.post(f"/opportunities/{oid}/delete", follow_redirects=False)
+    assert r.status_code == 303 and db.get_opportunity(oid) is None and db.list_drafts(oid) == []
+    assert "Opportunity deleted" in client.get(r.headers["location"]).text

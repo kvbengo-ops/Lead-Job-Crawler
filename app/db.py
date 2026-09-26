@@ -18,7 +18,7 @@ CREATE TABLE IF NOT EXISTS opportunities (
  contact_email TEXT, published_at TEXT, raw_text TEXT NOT NULL DEFAULT '',
  extracted_by TEXT NOT NULL DEFAULT '{}', warnings TEXT NOT NULL DEFAULT '[]',
  duplicate_of INTEGER, status TEXT NOT NULL DEFAULT 'new', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
- labels TEXT NOT NULL DEFAULT '{}',
+ labels TEXT NOT NULL DEFAULT '{}', employment_types TEXT NOT NULL DEFAULT '[]',
  FOREIGN KEY (duplicate_of) REFERENCES opportunities(id)
 );
 CREATE INDEX IF NOT EXISTS idx_opportunities_canonical ON opportunities(canonical_url);
@@ -48,17 +48,22 @@ CREATE TABLE IF NOT EXISTS seen_items (
  PRIMARY KEY (source_key, item_id)
 );
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE IF NOT EXISTS profiles (
+ id INTEGER PRIMARY KEY, data TEXT, resume TEXT NOT NULL DEFAULT '', resume_updated_at TEXT,
+ updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
 """
 
 # Columns added after the first version of the schema; init() adds any an older database lacks.
 ADDED_COLUMNS = {
-    "opportunities": {"labels": "TEXT NOT NULL DEFAULT '{}'"},
+    "opportunities": {"labels": "TEXT NOT NULL DEFAULT '{}'", "employment_types": "TEXT NOT NULL DEFAULT '[]'"},
     "evaluations": {"passed": "INTEGER", "needs_review": "INTEGER NOT NULL DEFAULT 0",
                     "reject_reasons": "TEXT NOT NULL DEFAULT '[]'"},
 }
+PROFILE_ID = 1  # ponytail: one profile; add a user_id column when the app gets accounts
 OP_FIELDS = ("source_url", "canonical_url", "title", "company", "description", "location", "remote",
              "salary_min", "salary_max", "currency", "contact_email", "published_at", "raw_text",
-             "extracted_by", "warnings", "duplicate_of", "status")
+             "extracted_by", "warnings", "duplicate_of", "status", "employment_types")
 
 
 @contextmanager
@@ -99,7 +104,7 @@ def row_to_op(row: sqlite3.Row | None) -> dict | None:
         return None
     op = dict(row)
     op["remote"] = None if op.get("remote") is None else bool(op["remote"])
-    for key, default in (("extracted_by", {}), ("warnings", []), ("labels", {})):
+    for key, default in (("extracted_by", {}), ("warnings", []), ("labels", {}), ("employment_types", [])):
         op[key] = json.loads(op.get(key) or json.dumps(default))
     return op
 
@@ -117,6 +122,7 @@ def insert_opportunity(op: dict[str, Any]) -> tuple[int, bool]:
         values["remote"] = None if op.get("remote") is None else int(bool(op["remote"]))
         values["extracted_by"] = _json(op.get("extracted_by"), {})
         values["warnings"] = _json(op.get("warnings"), [])
+        values["employment_types"] = _json(op.get("employment_types"), [])
         values["status"] = op.get("status") or "new"
         if existing:
             values["duplicate_of"], values["status"] = int(existing["id"]), "ignored"
@@ -156,8 +162,11 @@ def pending_ids() -> list[int]:
 
 
 def list_opportunities(status: str | None = None, kind: str | None = None, needs_review: bool = False,
-                       show_rejected: bool = False, show_duplicates: bool = False) -> list[dict]:
-    """Newest evaluation per opportunity, best score first. `kind` matches the user's label, else Laya's type."""
+                       show_rejected: bool = False, show_duplicates: bool = False,
+                       employment: str | None = None, hide_kinds: tuple[str, ...] = ()) -> list[dict]:
+    """Newest evaluation per opportunity, best score first. `kind` matches the user's label, else Laya's type.
+    Unless show_rejected, rejected items and those whose kind is in hide_kinds (spam, ...) are left out;
+    ignored items only show when asked for by status."""
     query = """
       SELECT o.*, e.score, e.passed, e.needs_review, e.reject_reasons,
              COALESCE(json_extract(o.labels, '$.type'), json_extract(e.result, '$.answers.type.value')) AS kind
@@ -168,15 +177,23 @@ def list_opportunities(status: str | None = None, kind: str | None = None, needs
     if status:
         query += " AND o.status=?"
         args.append(status)
+    else:
+        query += " AND o.status != 'ignored'"
     if not show_duplicates:
         query += " AND o.duplicate_of IS NULL"
     if not show_rejected:
         query += " AND COALESCE(e.passed, 1) = 1"
+        if hide_kinds:
+            query += f" AND COALESCE(kind, '') NOT IN ({', '.join('?' * len(hide_kinds))})"
+            args.extend(hide_kinds)
     if needs_review:
         query += " AND e.needs_review = 1"
     if kind:
         query += " AND kind = ?"
         args.append(kind)
+    if employment:
+        query += " AND EXISTS (SELECT 1 FROM json_each(o.employment_types) WHERE value = ?)"
+        args.append(employment)
     query += " ORDER BY e.score IS NULL, e.score DESC, o.id DESC"
     with connect() as con:
         rows = []
@@ -195,9 +212,50 @@ def count_created_since(timestamp: str | None) -> int:
                            (timestamp,)).fetchone()[0]
 
 
+def delete_opportunity(oid: int) -> None:
+    """Delete it with its evaluations and drafts, and the duplicate rows that point at it."""
+    with connect() as con:
+        con.execute("DELETE FROM opportunities WHERE duplicate_of=?", (oid,))
+        con.execute("DELETE FROM opportunities WHERE id=?", (oid,))
+
+
 def labeled_opportunities() -> list[dict]:
     with connect() as con:
         return [row_to_op(r) for r in con.execute("SELECT * FROM opportunities WHERE labels != '{}' ORDER BY id")]
+
+
+# --- profile and resume ----------------------------------------------------------
+
+def get_profile() -> dict | None:
+    """None until a profile is saved (a stored resume alone doesn't count)."""
+    with connect() as con:
+        r = con.execute("SELECT data FROM profiles WHERE id=?", (PROFILE_ID,)).fetchone()
+    return json.loads(r["data"]) if r and r["data"] is not None else None
+
+
+def save_profile(profile: dict) -> None:
+    with connect() as con:
+        con.execute("INSERT INTO profiles (id, data) VALUES (?, ?) ON CONFLICT(id) DO UPDATE SET "
+                    "data=excluded.data, updated_at=CURRENT_TIMESTAMP", (PROFILE_ID, _json(profile, {})))
+
+
+def get_resume() -> dict | None:
+    """{"text", "updated_at"} (local time), or None when no resume is stored."""
+    with connect() as con:
+        r = con.execute("SELECT resume, resume_updated_at FROM profiles WHERE id=?", (PROFILE_ID,)).fetchone()
+    return {"text": r["resume"], "updated_at": r["resume_updated_at"]} if r and r["resume"] else None
+
+
+def save_resume(text: str) -> None:
+    with connect() as con:
+        con.execute("INSERT INTO profiles (id, resume, resume_updated_at) VALUES (?, ?, datetime('now', 'localtime')) "
+                    "ON CONFLICT(id) DO UPDATE SET resume=excluded.resume, resume_updated_at=excluded.resume_updated_at",
+                    (PROFILE_ID, text))
+
+
+def delete_resume() -> None:
+    with connect() as con:
+        con.execute("UPDATE profiles SET resume='', resume_updated_at=NULL WHERE id=?", (PROFILE_ID,))
 
 
 # --- evaluations --------------------------------------------------------------
@@ -227,13 +285,21 @@ def latest_evaluation(oid: int) -> dict | None:
 
 # --- drafts -------------------------------------------------------------------
 
-def save_draft(oid: int, kind: str, content: str, draft_id: int | None = None) -> int:
+def save_draft(oid: int, kind: str, content: str, draft_id: int | None = None, status: str = "draft") -> int:
+    """status is "draft" for template drafts and "ai_generated" for Ollama drafts (kept when edited)."""
     with connect() as con:
         if draft_id:
             con.execute("UPDATE drafts SET content=?, updated_at=CURRENT_TIMESTAMP WHERE id=?", (content, draft_id))
             return draft_id
-        return int(con.execute("INSERT INTO drafts (opportunity_id, kind, content) VALUES (?,?,?)",
-                               (oid, kind, content)).lastrowid)
+        return int(con.execute("INSERT INTO drafts (opportunity_id, kind, content, status) VALUES (?,?,?,?)",
+                               (oid, kind, content, status)).lastrowid)
+
+
+def recent_drafts(limit: int = 5) -> list[dict]:
+    with connect() as con:
+        return [dict(r) for r in con.execute(
+            "SELECT d.id, d.kind, d.status, d.updated_at, o.id AS opportunity_id, o.title FROM drafts d "
+            "JOIN opportunities o ON o.id = d.opportunity_id ORDER BY d.updated_at DESC, d.id DESC LIMIT ?", (limit,))]
 
 
 def get_draft(draft_id: int) -> dict | None:

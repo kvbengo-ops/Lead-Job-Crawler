@@ -149,6 +149,12 @@ score(opportunity: dict, evaluation: dict, profile: dict) -> {
 - [ ] **U5. Register the schedule** by running `scripts/register_task.ps1` once (after C7), then let it run for a day and check the dashboard.
 - [ ] **U3. Phase 1 exit check.** Read `eval/report.md` and decide: is Laya good enough to rank by, or do we fine-tune it or swap questions for rules before Phase 2?
 
+## AI drafts with Ollama (added 2026-09-26)
+
+Pulled forward from Phase 3. On each opportunity's page, **AI job application** and **AI lead email** send the posting and the profile's factual fields (name, headline, skills, services, experience, work modes, preferred locations) to the local `qwen3:4b` through Ollama (`POST http://127.0.0.1:11434/api/chat`). The result is saved to `drafts` with status `ai_generated` and opened in the editor. Nothing is sent anywhere; the template drafts remain as the fallback. Code: `app/ollama_client.py`, tests: `tests/test_ollama.py` (Ollama is mocked).
+
+- **Reasoning can't be turned off:** the installed `qwen3:4b` is a thinking-only model. The prompt asks it to think briefly, which brought a draft from "never finished in 4.5 minutes" down to about 70-210 s on this PC. A non-thinking model would be several times faster: set `OLLAMA_MODEL` (for example to `qwen3:4b-instruct` after `ollama pull qwen3:4b-instruct`). Not tested here.
+- **Rules aren't followed perfectly:** in testing, a job application still claimed "available to start immediately". Every AI draft is marked for review in the editor.
 ## Findings from the first real run (2026-09-26)
 
 A real crawl of the We Work Remotely programming feed (25 jobs) with the live Laya ran without errors, but it also showed:

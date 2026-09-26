@@ -4,10 +4,46 @@ from __future__ import annotations
 import re
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
+from html import unescape
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 TRACKING_PARAMS = {"fbclid", "gclid", "msclkid", "mc_cid", "mc_eid", "ref", "ref_src", "_hsenc", "_hsmi", "igshid"}
 EMAIL = re.compile(r"^[\w.+-]+@[\w-]+(\.[\w-]+)+$")
+
+# Employment types, in the order the profile page shows them. "flexible_hours" can accompany any other type.
+EMPLOYMENT_TYPES = ("full_time", "part_time", "contract", "freelance", "internship", "flexible_hours")
+EMPLOYMENT_PATTERNS = {
+    "full_time": r"\bfull[- ]?time\b",
+    "part_time": r"\bpart[- ]?time\b",
+    "contract": r"\b(?:contract(?:or)? (?:role|position|job|basis)|fixed[- ]term|temporary (?:role|position|contract)"
+                r"|contract[- ]to[- ]hire|\d+[- ]month contract)\b",
+    "freelance": r"\b(?:freelanc\w*|fixed[- ]price|hourly project|upwork|fiverr)\b",
+    "internship": r"\bintern(?:ship)?s?\b",
+    "flexible_hours": r"\bflexib(?:le|ility)(?: working)? (?:hours|schedule|working hours|work hours|time)\b|\bflexitime\b|\bflextime\b",
+}
+# Values sources use (schema.org employmentType, Lever "commitment") mapped to ours.
+EMPLOYMENT_ALIASES = {
+    "full_time": "full_time", "fulltime": "full_time", "full-time": "full_time", "full time": "full_time",
+    "permanent": "full_time",
+    "part_time": "part_time", "parttime": "part_time", "part-time": "part_time", "part time": "part_time",
+    "contractor": "contract", "contract": "contract", "temporary": "contract", "temp": "contract",
+    "fixed term": "contract", "per_diem": "contract",
+    "freelance": "freelance", "freelancer": "freelance",
+    "intern": "internship", "internship": "internship",
+    "flexible_hours": "flexible_hours", "flexible hours": "flexible_hours",
+}
+
+
+def employment_types(given, text: str) -> list[str]:
+    """Types the source states (schema.org or Lever values), else types the text mentions.
+    Flexible hours are always looked for in the text, since sources don't encode them."""
+    values = given if isinstance(given, list) else [given] if given else []
+    found = {EMPLOYMENT_ALIASES.get(str(v).strip().lower()) for v in values} - {None}
+    stated = bool(found)
+    for key, pattern in EMPLOYMENT_PATTERNS.items():
+        if (not stated or key == "flexible_hours") and re.search(pattern, text, re.I):
+            found.add(key)
+    return [t for t in EMPLOYMENT_TYPES if t in found]
 
 
 def canonical_url(url: str | None) -> str | None:
@@ -29,6 +65,17 @@ def clean(value):
     if isinstance(value, str):
         return re.sub(r"\s+", " ", value).strip() or None
     return value
+
+
+def clean_title(title: str | None, source_url: str | None) -> str | None:
+    """Unescape leftover entities and drop a trailing " 1234567 - Board.com" when Board.com is the page's host.
+    A plain name ("Data Engineer | Globex") stays: on a company's own site that is the company."""
+    title = clean(unescape(title)) if title else None
+    host = re.sub(r"\W", "", urlsplit(source_url or "").netloc.lower())
+    m = re.match(r"^(.*\S)\s+[-|–—]\s+([^-|–—]+)$", title or "")
+    if m and host and "." in m.group(2) and (site :=re.sub(r"\W", "", m.group(2).lower())) and site in host:
+        return re.sub(r"\s+#?\d{4,}$", "", m.group(1))
+    return title
 
 
 def iso_date(value) -> str | None:
@@ -61,6 +108,7 @@ def normalize(op: dict) -> dict:
     warnings = list(result.get("warnings") or [])
     for key in ("title", "company", "location", "contact_email", "source_url", "currency"):
         result[key] = clean(result.get(key))
+    result["title"] = clean_title(result["title"], result["source_url"])
     # Keep line breaks in the description (they carry structure); only tidy spaces within lines.
     description = result.get("description") or ""
     description = "\n".join(re.sub(r"[ \t\f\v]+", " ", line).strip() for line in description.splitlines())
@@ -97,6 +145,8 @@ def normalize(op: dict) -> dict:
 
     if result.get("remote") is not None:
         result["remote"] = bool(result["remote"])
+    result["employment_types"] = employment_types(result.get("employment_types"),
+                                                  f"{result.get('title') or ''}\n{result['description']}")
     result["canonical_url"] = canonical_url(result.get("source_url"))
     result["raw_text"] = result.get("raw_text") or result["description"]
     result["extracted_by"] = dict(result.get("extracted_by") or {})

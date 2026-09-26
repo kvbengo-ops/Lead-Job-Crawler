@@ -5,6 +5,9 @@ Unknown facts score 0.5 (neutral) rather than 0, so missing data never looks lik
 """
 import re
 
+# Used for any component profile.json's "score_weights" doesn't mention.
+DEFAULT_WEIGHTS = {"relevance": 60, "skills": 20, "salary": 10, "location": 10, "employment": 10}
+
 
 def _mentions(term: str, text: str) -> bool:
     # Word-boundary match that also works for terms like "c++" or "node.js", and avoids "india" in "indianapolis".
@@ -112,7 +115,25 @@ def score(opportunity: dict, evaluation: dict, profile: dict) -> dict:
         components["location"] = 0.0
         reasons.append(f"Work mode {mode} is not in your preferences ({', '.join(modes)})")
 
-    weights = profile.get("score_weights") or {"relevance": 60, "skills": 20, "salary": 10, "location": 10}
+    # --- employment type (full-time, part-time, contract, freelance, internship, flexible hours) -------------
+    # A mismatch lowers the score but never rejects: types are often missing or guessed from text.
+    wanted = profile.get("employment_types") or []
+    offered = opportunity.get("employment_types") or []
+    label = lambda types: ", ".join(t.replace("_", " ") for t in types)
+    if not wanted:
+        components["employment"] = 0.5
+        reasons.append("No employment type preference set")
+    elif not offered:
+        components["employment"] = 0.5
+        reasons.append("Employment type not stated")
+    elif set(wanted) & set(offered):
+        components["employment"] = 1.0
+        reasons.append(f"Employment type {label(sorted(set(wanted) & set(offered), key=offered.index))} matches your preference")
+    else:
+        components["employment"] = 0.0
+        reasons.append(f"Employment type {label(offered)} is not in your preferences ({label(wanted)})")
+
+    weights = {**DEFAULT_WEIGHTS, **(profile.get("score_weights") or {})}
     total = sum(weights.get(k, 0) for k in components)
     value = sum(components[k] * weights.get(k, 0) for k in components) / total * 100 if total else 0.0
     return {

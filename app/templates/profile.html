@@ -1,37 +1,96 @@
 {% extends "base.html" %}
+{% from "_macros.html" import alert %}
+{% set active = 'profile' %}
 {% block title %}Profile{% endblock %}
 {% block content %}
-<h1>Profile</h1>
-{% if saved %}<div class="card notice">Saved. New evaluations use it; use "Re-evaluate" to update existing ones.</div>{% endif %}
-{% if error %}<div class="card notice error">{{ error }}</div>{% endif %}
-<form method="post" class="card">
-  <label for="name">Name (used in drafts)</label>
-  <input type="text" id="name" name="name" value="{{ p.name }}">
-  <label for="headline">Headline</label>
-  <input type="text" id="headline" name="headline" value="{{ p.headline }}">
-  <label for="skills">Skills, comma-separated</label>
-  <input type="text" id="skills" name="skills" value="{{ p.skills|join(', ') }}">
-  <label for="services">Services, comma-separated</label>
-  <input type="text" id="services" name="services" value="{{ p.services|join(', ') }}">
-  <label>Work modes you accept</label>
-  {% for m in ['remote', 'hybrid', 'onsite'] %}
-  <label class="check"><input type="checkbox" name="work_modes" value="{{ m }}" {{ 'checked' if m in p.work_modes }}> {{ m }}</label>
-  {% endfor %}
-  <label for="preferred_locations">Preferred locations, comma-separated</label>
-  <input type="text" id="preferred_locations" name="preferred_locations" value="{{ p.preferred_locations|join(', ') }}">
-  <label for="excluded_locations">Excluded locations, comma-separated (these are rejected)</label>
-  <input type="text" id="excluded_locations" name="excluded_locations" value="{{ p.excluded_locations|join(', ') }}">
-  <div class="filters">
-    <div><label for="min_salary">Minimum yearly salary</label>
-      <input type="number" id="min_salary" name="min_salary" min="0" step="any" value="{{ p.min_salary if p.min_salary is not none else '' }}"></div>
-    <div><label for="currency">Currency</label>
-      <input type="text" id="currency" name="currency" value="{{ p.currency }}" maxlength="3" size="4"></div>
-    <div><label for="confidence_threshold">Review below confidence</label>
-      <input type="number" id="confidence_threshold" name="confidence_threshold" min="0" max="1" step="0.05" value="{{ p.confidence_threshold }}"></div>
+<header class="page-head">
+  <div>
+    <h1>Profile</h1>
+    <p>Laya scores every opportunity against this, and AI drafts only use what's here.</p>
   </div>
-  <label for="blocked_words">Blocked words, comma-separated (these are rejected)</label>
-  <input type="text" id="blocked_words" name="blocked_words" value="{{ p.blocked_words|join(', ') }}">
-  <p class="muted small">Laya's questions and the score weights stay in <code>profile.json</code>; this page doesn't change them.</p>
-  <p><button class="primary">Save profile</button></p>
-</form>
+</header>
+{% if saved %}{{ alert('Profile saved. New evaluations use it; use "Re-evaluate" on an opportunity to update its score.', 'success') }}{% endif %}
+{{ alert(notice) }}
+{{ alert(error, 'error') }}
+
+<div class="grid split">
+  <form method="post" action="/profile" class="card" id="profile-form">
+    {% if from_resume %}{{ alert('Not saved yet: check the fields filled in from your resume, then click Save profile.', 'warn') }}{% endif %}
+    <h2>About you</h2>
+    <div class="row">
+      <div class="field"><label for="name">Name</label>
+        <input type="text" id="name" name="name" value="{{ p.name }}" autocomplete="name">
+        <p class="help">Used to sign drafts.</p></div>
+      <div class="field"><label for="headline">Headline</label>
+        <input type="text" id="headline" name="headline" value="{{ p.headline }}" placeholder="Python developer"></div>
+    </div>
+    <div class="field"><label for="experience">Experience and achievements</label>
+      <textarea id="experience" name="experience" style="min-height:140px" placeholder="For example: 4 years building Python APIs at Acme; automated invoicing for a 20-person agency, saving 10 hours a week.">{{ p.experience }}</textarea>
+      <p class="help">AI drafts only use this, your resume, and the fields below; anything missing becomes a [placeholder] for you to fill in.</p></div>
+    <div class="field"><label for="skills">Skills</label>
+      <input type="text" id="skills" name="skills" value="{{ p.skills|join(', ') }}" placeholder="python, fastapi, sql">
+      <p class="help">Separate with commas.</p></div>
+    <div class="field"><label for="services">Services you offer</label>
+      <input type="text" id="services" name="services" value="{{ p.services|join(', ') }}" placeholder="backend development, data pipelines">
+      <p class="help">Separate with commas. Used in lead emails.</p></div>
+
+    <h2 style="margin-top:28px">Work preferences</h2>
+    <p class="help" style="margin:-6px 0 16px">Jobs that don't match rank lower and show why. They aren't hidden, because posts often leave these out.</p>
+    <fieldset class="field"><legend class="label">Work mode</legend>
+      <div class="checks">
+      {% for m, label in [('remote', 'Remote'), ('hybrid', 'Hybrid'), ('onsite', 'On-site')] %}
+      <label class="check"><input type="checkbox" name="work_modes" value="{{ m }}" {{ 'checked' if m in p.work_modes }}> {{ label }}</label>
+      {% endfor %}
+      </div></fieldset>
+    <fieldset class="field"><legend class="label">Employment type</legend>
+      <div class="checks">
+      {% for t in employment_types %}
+      <label class="check"><input type="checkbox" name="employment_types" value="{{ t }}" {{ 'checked' if t in p.employment_types }}> {{ employment_labels[t] }}</label>
+      {% endfor %}
+      </div></fieldset>
+    <div class="row">
+      <div class="field"><label for="preferred_locations">Preferred locations</label>
+        <input type="text" id="preferred_locations" name="preferred_locations" value="{{ p.preferred_locations|join(', ') }}" placeholder="Manila, Remote"></div>
+      <div class="field"><label for="excluded_locations">Excluded locations</label>
+        <input type="text" id="excluded_locations" name="excluded_locations" value="{{ p.excluded_locations|join(', ') }}">
+        <p class="help">Matches are rejected.</p></div>
+    </div>
+    <div class="row">
+      <div class="field"><label for="min_salary">Minimum yearly salary</label>
+        <input type="number" id="min_salary" name="min_salary" min="0" step="any" value="{{ p.min_salary if p.min_salary is not none else '' }}"></div>
+      <div class="field" style="flex:0 1 110px"><label for="currency">Currency</label>
+        <input type="text" id="currency" name="currency" value="{{ p.currency }}" maxlength="3"></div>
+      <div class="field"><label for="confidence_threshold">Review below confidence</label>
+        <input type="number" id="confidence_threshold" name="confidence_threshold" min="0" max="1" step="0.05" value="{{ p.confidence_threshold }}">
+        <p class="help">0 to 1. Less sure answers get "needs review".</p></div>
+    </div>
+    <div class="field"><label for="blocked_words">Blocked words</label>
+      <input type="text" id="blocked_words" name="blocked_words" value="{{ p.blocked_words|join(', ') }}">
+      <p class="help">Separate with commas. Posts containing them are rejected.</p></div>
+    <div class="form-actions sticky-actions">
+      <button class="primary">{{ icon('check') }}Save profile</button>
+      <span class="help" style="margin:0">Laya's questions and score weights are kept as they are.</span>
+    </div>
+  </form>
+
+  <section class="card" aria-labelledby="resume-title">
+    <h2 id="resume-title">Start from your resume</h2>
+    <p class="help" style="margin:-4px 0 16px">{{ ai_model }} reads it on this PC and fills in the form for you to check. Nothing is saved until you click Save profile. The text stays in <code>data\app.db</code> so AI drafts can use your full history.</p>
+    {% if resume %}
+    <div class="alert success" style="margin-bottom:16px">{{ icon('file') }}<div>Resume on file: {{ resume.words }} words, uploaded {{ resume.updated }}.</div></div>
+    {% endif %}
+    <form method="post" action="/profile/resume" enctype="multipart/form-data" data-busy="Reading…" data-busy-note="resume-progress">
+      <label for="resume-file">{{ 'Replace your resume' if resume else 'Resume file' }}</label>
+      <input type="file" id="resume-file" name="file" accept=".pdf,.docx,.txt,.md" required>
+      <p class="help">PDF, Word (.docx), or text, up to 5 MB.</p>
+      <div class="form-actions"><button class="primary">{{ icon('upload') }}Read my resume</button></div>
+    </form>
+    <div class="alert" id="resume-progress" hidden style="margin:16px 0 0">{{ icon('clock') }}<div>Reading your resume with {{ ai_model }}. This can take a few minutes; keep this page open.</div></div>
+    {% if resume %}
+    <form method="post" action="/profile/resume/delete" style="margin-top:16px">
+      <button class="ghost sm danger">{{ icon('trash') }}Delete resume</button>
+    </form>
+    {% endif %}
+  </section>
+</div>
 {% endblock %}

@@ -1,14 +1,58 @@
 {% extends "base.html" %}
+{% from "_macros.html" import alert %}
+{% set active = 'add' %}
 {% block title %}Add opportunity{% endblock %}
 {% block content %}
-<h1>Add opportunity</h1>
-{% if error %}<div class="card notice error">{{ error }}</div>{% endif %}
-<form method="post" class="card">
-  <label for="url">Page URL</label>
-  <input type="url" id="url" name="url" value="{{ url }}" placeholder="https://…">
-  <p class="muted small">The page is fetched once, if the site's robots.txt allows it. Pages that need JavaScript may come back empty; paste the text instead.</p>
-  <label for="text">Or paste the posting</label>
-  <textarea id="text" name="text" placeholder="First line: the title. Then the description.">{{ text }}</textarea>
-  <p><button class="primary">Add and evaluate</button></p>
+<header class="page-head">
+  <div>
+    <h1>Add opportunity</h1>
+    <p>Laya scores it against your <a href="/profile">profile</a> as soon as it's added.</p>
+  </div>
+</header>
+{{ alert(error, 'error') }}
+{% if failures %}
+<div class="alert {{ 'warn' if added else 'error' }}" role="alert">{{ icon('alert') }}<div>
+  {% if added %}Added {{ added }} job{{ '' if added == 1 else 's' }}, but {% endif %}{{ failures|length }} couldn't be added:
+  <ul class="small" style="margin:6px 0 0; padding-left:18px">{% for e in failures %}<li>{{ e }}</li>{% endfor %}</ul>
+  {% if added %}<a href="/opportunities?status=new">See the new jobs</a>{% endif %}
+</div></div>
+{% endif %}
+
+{% if jobs %}
+<form method="post" action="/add/many" class="card" style="max-width:760px; margin-bottom:24px" data-busy="Adding…" data-busy-note="many-note">
+  <div class="card-head"><h2>This page lists {{ jobs|length }} jobs</h2></div>
+  <p class="help" style="margin:-6px 0 16px">It's a list, not one job, so it wasn't saved. Pick the jobs to add; each is fetched from its own page and scored.</p>
+  <ul class="items">
+    {% for j in jobs %}
+    <li class="item" style="align-items:center">
+      <input type="checkbox" name="urls" value="{{ j.url }}" id="job-{{ loop.index }}" {{ 'checked' if not j.have }} style="width:18px; height:18px; accent-color:var(--primary)">
+      <label for="job-{{ loop.index }}" class="body" style="margin:0; font-weight:500">{{ j.name }}
+        <span class="meta" style="display:block; font-weight:400; overflow-wrap:anywhere">{{ j.url }}</span></label>
+      {% if j.have %}<a class="chip good" href="/opportunities/{{ j.have }}">{{ icon('check') }}already added</a>{% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+  <div class="form-actions">
+    <button class="primary">{{ icon('sparkles') }}Add selected jobs</button>
+    <span class="muted small" id="many-note" hidden>Fetching each job politely, one at a time, and asking Laya. This can take a minute.</span>
+  </div>
+</form>
+{% endif %}
+
+<form method="post" class="card" style="max-width:760px" data-busy="Adding…" data-busy-note="add-note">
+  <div class="field">
+    <label for="url">Link to the posting</label>
+    <input type="url" id="url" name="url" value="{{ url }}" placeholder="https://example.com/jobs/123" autofocus>
+    <p class="help">Fetched once, only if the site's robots.txt allows it.</p>
+  </div>
+  <div class="field">
+    <label for="text">Or paste the posting</label>
+    <textarea id="text" name="text" placeholder="First line: the title. Then the description.">{{ text }}</textarea>
+    <p class="help">Use this for pages that need JavaScript or a login; they often come back empty.</p>
+  </div>
+  <div class="form-actions">
+    <button class="primary">{{ icon('sparkles') }}Add and score</button>
+    <span class="muted small" id="add-note" hidden>Fetching and asking Laya. This takes a few seconds.</span>
+  </div>
 </form>
 {% endblock %}

@@ -1,0 +1,130 @@
+{% extends "base.html" %}
+{% from "_macros.html" import score, chips %}
+{% set active = 'dashboard' %}
+{% block title %}Dashboard{% endblock %}
+{% block content %}
+<header class="page-head">
+  <div>
+    <h1>{% if user_name %}Welcome back, <span class="grad-text">{{ user_name.split()[0] }}</span>{% else %}Welcome{% endif %}</h1>
+    <p>{% if new_count %}<strong>{{ new_count }} new</strong> since your last visit. {% endif %}Find, score, and reply to jobs and leads, all on this PC.</p>
+  </div>
+  <a class="btn primary" href="/add">{{ icon('plus') }}Add opportunity</a>
+</header>
+
+{% if setup %}
+<section class="card" aria-labelledby="setup-title" style="margin-bottom:24px">
+  <div class="card-head"><h2 id="setup-title">Finish setting up</h2><span class="muted small">{{ setup|selectattr(3)|list|length }} of {{ setup|length }} done</span></div>
+  <ol class="steps">
+    {% for title, why, href, done in setup if not done %}
+    <li><a href="{{ href }}">
+      <span class="dot"></span>
+      <span><strong>{{ title }}</strong><br><span class="muted small">{{ why }}</span></span>
+      <span class="muted" style="margin-left:auto">{{ icon('arrow-right') }}</span>
+    </a></li>
+    {% endfor %}
+  </ol>
+</section>
+{% endif %}
+
+<form class="card" method="post" action="/add" style="margin-bottom:24px" data-busy="Adding…" data-busy-note="quick-note">
+  <label for="quick-url">Add a job or lead from a link</label>
+  <div class="row" style="gap:10px">
+    <input type="url" id="quick-url" name="url" required placeholder="https://example.com/jobs/123" style="flex:1 1 260px">
+    <button class="primary">{{ icon('sparkles') }}Add and score</button>
+  </div>
+  <p class="help" id="quick-note" hidden>Fetching the page and asking Laya. This takes a few seconds.</p>
+  <p class="help">Page needs JavaScript or a login? <a href="/add">Paste the text instead</a>.</p>
+</form>
+
+<div class="grid stats">
+  <a class="card stat" href="/opportunities">
+    <span class="label">{{ icon('inbox') }}Active opportunities</span>
+    <span class="value">{{ stats.total }}</span>
+    <span class="hint">Not rejected or duplicates</span>
+  </a>
+  <a class="card stat" href="/opportunities?status=shortlisted">
+    <span class="label">{{ icon('star') }}Shortlisted</span>
+    <span class="value">{{ stats.shortlisted }}</span>
+    <span class="hint">Ready for a reply</span>
+  </a>
+  <a class="card stat" href="/opportunities?review=1">
+    <span class="label">{{ icon('flag') }}Needs review</span>
+    <span class="value">{{ stats.review }}</span>
+    <span class="hint">Laya wasn't sure</span>
+  </a>
+  <a class="card stat" href="/opportunities?status=pending_evaluation">
+    <span class="label">{{ icon('clock') }}Pending evaluation</span>
+    <span class="value">{{ stats.pending }}</span>
+    <span class="hint">Retried on the next crawl</span>
+  </a>
+</div>
+
+<div class="grid split">
+  <section class="card" aria-labelledby="top-title">
+    <div class="card-head">
+      <h2 id="top-title">Top new matches</h2>
+      {% if top %}<a class="small" href="/opportunities?status=new">View all</a>{% endif %}
+    </div>
+    {% if top %}
+    <ul class="items">
+      {% for o in top %}
+      <li class="item">
+        {{ score(o.score) }}
+        <div class="body">
+          <a class="title" href="/opportunities/{{ o.id }}">{{ o.title or 'Untitled opportunity' }}</a>
+          <div class="meta">{{ [o.company, o.location]|select|join(' · ') or o.source_url|host or 'Pasted text' }}</div>
+          <div class="chips">{{ chips(o) }}</div>
+        </div>
+      </li>
+      {% endfor %}
+    </ul>
+    {% else %}
+    <div class="empty">
+      {{ icon('inbox') }}
+      <h2>No new opportunities</h2>
+      <p>Paste a job post or a link to score it against your profile.</p>
+      <div class="actions-bar"><a class="btn primary" href="/add">{{ icon('plus') }}Add opportunity</a>
+        <a class="btn" href="/sources">{{ icon('rss') }}Add a source</a></div>
+    </div>
+    {% endif %}
+  </section>
+
+  <div class="stack">
+    <section class="card" aria-labelledby="crawl-title">
+      <div class="card-head"><h2 id="crawl-title">Crawler</h2><a class="small" href="/sources">{{ source_count }} source{{ '' if source_count == 1 else 's' }}</a></div>
+      {% if last_run %}
+      <p class="small muted">{{ icon('clock') }} Last run {{ (last_run.ended_at or last_run.started_at)|ts }} UTC</p>
+      <p>{{ last_run.new_items }} new, {{ last_run.duplicates }} duplicate{{ '' if last_run.duplicates == 1 else 's' }}, {{ last_run.pending }} pending</p>
+      {% if last_run.errors %}
+      <details>
+        <summary><span class="chip bad">{{ last_run.errors|length }} error{{ '' if last_run.errors|length == 1 else 's' }}</span></summary>
+        <ul class="small">{% for e in last_run.errors %}<li>{{ e }}</li>{% endfor %}</ul>
+      </details>
+      {% else %}<span class="chip good">{{ icon('check') }}No errors</span>{% endif %}
+      {% else %}
+      <p class="muted small">No scheduled crawl has run yet. {% if not source_count %}<a href="/sources">Add a source</a> to start.{% else %}Run <code>scripts\run_crawl.ps1</code> or schedule it.{% endif %}</p>
+      {% endif %}
+    </section>
+
+    <section class="card" aria-labelledby="drafts-title">
+      <div class="card-head"><h2 id="drafts-title">Recent drafts</h2></div>
+      {% if drafts %}
+      <ul class="items">
+        {% for d in drafts %}
+        <li class="item">
+          <span class="muted">{{ icon('mail') }}</span>
+          <div class="body">
+            <a class="title" href="/drafts/{{ d.id }}">{{ d.kind.replace('_', ' ')|capitalize }}</a>
+            {% if d.status == 'ai_generated' %}<span class="chip">AI</span>{% endif %}
+            <div class="meta">{{ d.title or 'Untitled opportunity' }} · {{ d.updated_at|ts }} UTC</div>
+          </div>
+        </li>
+        {% endfor %}
+      </ul>
+      {% else %}
+      <p class="muted small">No drafts yet. Open an opportunity and choose <strong>AI job application</strong> or <strong>AI lead email</strong>.</p>
+      {% endif %}
+    </section>
+  </div>
+</div>
+{% endblock %}

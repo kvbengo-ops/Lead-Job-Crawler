@@ -28,7 +28,7 @@ def _description(opportunity: dict) -> str:
 
 
 def build_state(opportunity: dict, layout: str = "full") -> str:
-    """The text Laya reads. A question picks its layout with "state" in profile.json:
+    """The text Laya reads. A question picks its layout with "state" in the profile:
 
     "full" (default): key facts first, then the description, so model-side truncation only loses
       description text. Best for classifying the opportunity type.
@@ -110,7 +110,7 @@ def evaluate(opportunity: dict, profile: dict, client: httpx.Client | None = Non
     """Never raises for server trouble: failures come back in "error" with empty answers."""
     result = {"answers": {}, "model": None, "question_version": profile.get("question_version"), "error": None}
     if not profile.get("questions"):
-        result["error"] = "profile.json has no Laya questions"
+        result["error"] = "The profile has no Laya questions"
         return result
     # One request per state layout (normally at most two), with every question for that layout in it.
     groups: dict[str, dict] = {}
