@@ -1,102 +1,192 @@
-# Automated Job Scraping Plan
+# Automated Job and Lead Discovery Plan
 
-Goal: set preferences once, and new jobs keep showing up on the dashboard, scored and deduplicated, without pasting links.
+## Problem
+
+The goal: set your preferences once, and good jobs and client leads keep arriving on the dashboard, scored and ready for a reply, without pasting links.
+
+Today the app is far from that:
+
+1. **Nobody searches.** The crawler only visits the sources you add, and only the first page of each. There is one source today (an OnlineJobs.ph search for "vibe coder"). The crawler doesn't try other keywords, sites, or later result pages.
+2. **Nothing runs on its own.** The scheduled task script exists but isn't installed, so every crawl so far was started by hand.
+3. **The best sites are behind a login.** LinkedIn and similar sites hide jobs from visitors. Scraping them while logged in breaks their terms and risks a ban on *your* account.
+4. **Leads aren't on job boards.** People and businesses who need your services post in communities (Reddit, Hacker News), not on job boards.
+5. **Sources break silently.** A dead feed or a changed layout looks exactly like "no new jobs".
+6. **The scoring is noisy.** 21 of 26 opportunities are flagged *needs review* because Laya isn't confident. Adding more sources now would mostly add more noise.
+7. **Slow replies lose.** On OnlineJobs.ph and Reddit, the first good reply usually wins. Right now you only see a new match when you happen to open the dashboard.
+
+An AI agent that browses the web looking for links (OpenClaw-style) sounds like the fix, but it isn't a good one here. The local model (`qwen2.5:3b`) is too small for reliable multi-step browsing and tends to invent URLs. An agent that reads untrusted web pages while having access to your PC can also be manipulated by text hidden in those pages (prompt injection).
+
+## Solution
+
+Give each job to whatever does it best, and let your own clicks steer the system.
+
+| Job | Done by | Why |
+|---|---|---|
+| Searching a site's jobs, including login-only sites | **The site itself, through its email alerts** | A site searches its own listings better than any scraper can. Alerts are allowed by the site's terms and need no login from the app |
+| Fetching the same sources several times a day | **The crawler** (already built) | Cheap, predictable, and polite |
+| Finding *new sources* (boards, subreddits, communities) | **A strong AI with web search, once a week** | Sources change rarely, so occasional research is enough. You approve every suggestion |
+| Suggesting new search keywords | **Ollama**, from the jobs you shortlist | A small model is good enough for this, and it works from real data |
+| Judging each job | **Laya + the score engine** (already built) | A wide net is fine when junk is filtered out |
+| Deciding which sources are worth keeping | **Your shortlist and ignore clicks**, counted per source | Real results, not guesses |
+| Replying fast | **A Windows notification with an AI draft already written** | Cuts the time from post to reply |
+
+### Architecture
+
+```mermaid
+flowchart TB
+    subgraph FIND["1 · Discovery: where links come from"]
+        direction LR
+        MAIL["Job-board email alerts<br/>LinkedIn · Indeed · JobStreet …<br/>(Gmail label, read over IMAP)"]:::new
+        FEEDS["Feeds and APIs<br/>We Work Remotely RSS<br/>Remotive · Remote OK"]:::new
+        SEARCH["Keyword searches<br/>on listing pages<br/>(OnlineJobs.ph …)"]:::have
+        LEADS["Lead communities<br/>Reddit hiring subs · HN monthly<br/>'Who is hiring' / 'Seeking freelancer'"]:::new
+        MANUAL["You<br/>paste a link or text"]:::have
+    end
+
+    subgraph STEER["2 · Steering: what to look for"]
+        direction LR
+        RESEARCH["Weekly source research<br/>strong AI + web search"]:::new
+        KEYWORDS["Keyword suggestions<br/>Ollama reads your shortlists"]:::new
+        YIELD["Source ranking<br/>score, shortlists, junk share per source"]:::new
+        APPROVE{"You approve<br/>on the Sources page"}:::new
+    end
+
+    SCHED["Task Scheduler<br/>08:00 · 13:00 · 18:00"]:::fix
+    CRAWL["Crawler · app/crawl.py<br/>lock · daily limits · ETag · seen items<br/>+ source health"]:::have
+
+    PIPE["3 · Shared pipeline · app/pipeline.py<br/>extract → normalize → dedupe → Laya → score 0–100"]:::have
+
+    DB[("SQLite · data/app.db")]:::have
+    DASH["Dashboard<br/>shortlist · ignore · label"]:::have
+
+    subgraph ACT["4 · Fast response"]
+        direction LR
+        NOTIFY["Windows notification<br/>for matches ≥ 80"]:::new
+        PREDRAFT["AI draft written in advance<br/>Ollama · qwen2.5:3b"]:::new
+    end
+
+    SCHED --> CRAWL
+    MAIL & FEEDS & SEARCH & LEADS --> CRAWL
+    CRAWL --> PIPE
+    MANUAL --> PIPE
+    PIPE --> DB --> DASH
+    PIPE -->|"≥ 80"| PREDRAFT --> NOTIFY --> DASH
+
+    DASH -->|"your clicks"| YIELD
+    DASH -->|"shortlisted jobs"| KEYWORDS
+    RESEARCH --> APPROVE
+    KEYWORDS --> APPROVE
+    YIELD -->|"pause weak sources"| APPROVE
+    APPROVE -->|"sources.json"| CRAWL
+
+    classDef have fill:#e2f6eb,stroke:#0f7a45,color:#0b3d24
+    classDef new fill:#efeaff,stroke:#6d4aff,color:#2a1a6e
+    classDef fix fill:#fdf2df,stroke:#9a5b00,color:#4a2c00
+```
+
+Green = already built. Purple = new in this plan. Amber = built but not switched on.
+
+The loop is the point. Discovery brings links in, Laya scores them, your shortlist and ignore clicks show which sources and keywords pay off, and those results decide what gets searched next. Every new source goes through you, so nothing starts crawling without your approval.
+
+### The parts
+
+**Email alerts (the biggest win).** You save searches on LinkedIn, Indeed, JobStreet, and any other board that offers alerts, and send the alert emails to a Gmail label such as `job-alerts`. A new `imap` source kind reads that label with Python's built-in `imaplib` and `email` modules. Each alert email lists several jobs, so it's split into one opportunity per job:
+- A small parser for each common sender (LinkedIn, Indeed, JobStreet), with a generic fallback that pairs job links with the text around them.
+- If a job page may be fetched (its `robots.txt` allows it), the full posting is fetched for better scoring. Otherwise, as on LinkedIn, the job is scored from the email text, and the link opens the site in your browser.
+- Emails are tracked by `Message-ID` in `seen_items`, like every other source.
+
+**Feeds, APIs, and lead communities.** We Work Remotely's RSS works with the existing `rss` source kind today. Remotive and Remote OK each get a small source kind for their JSON APIs. For leads, add Reddit hiring subreddits (through their RSS feeds) and the Hacker News monthly threads (through the free Algolia search API).
+
+**Source health.** Each source records its last success, last error, consecutive failures, and new items from the last run. A listing page that yields no job links counts as a failure, because that's what a login wall or a layout change looks like.
+
+**Source ranking.** For each source: items found, average score, shortlisted, ignored, and rejected. The Sources page sorts by that and suggests pausing a source that has produced 30+ items and no shortlists.
+
+**Keyword suggestions.** On demand, and monthly, Ollama reads the titles and descriptions of what you've shortlisted and proposes new search terms. For boards with a known search URL (OnlineJobs.ph `jobkeyword=`, Remotive `search=`), each term becomes a ready-made source suggestion.
+
+**Weekly source research.** A script (`python -m app.research`, run weekly by Task Scheduler) asks a strong model with web search (the Claude API, for example) to find job boards, subreddits, and communities for your skills and region. It must return only sources it actually found, with URLs. Each one is checked by fetching it before it's shown to you as a suggestion. This is the only part that costs money (API credits), and running weekly keeps it small.
+
+**Fast response.** When a crawl finds a match scoring 80 or more, the app writes an AI draft for it straight away (at most 3 per run, about 20 seconds each) and shows a Windows notification. Clicking the notification opens that opportunity with the draft ready.
+
+**Better scoring first.** Before adding volume, label 30–50 opportunities on their detail pages and run `eval/run_eval.py` to see where Laya goes wrong. Then adjust the questions and the confidence threshold, and fix the extraction problems still visible in the data (text-encoding errors, leftover page navigation).
 
 ## Where things stand (checked 2026-09-26)
 
-Most of the machinery already exists. What's missing is small, but one gap is critical.
+| Piece | Status |
+|---|---|
+| Greenhouse, Lever, RSS/Atom, and listing-page sources | Built (`app/crawl.py`) |
+| Manage sources from the dashboard | Built (`/sources`, writes `sources.json`) |
+| ETag / Last-Modified, seen items marked only after processing, retries | Built |
+| Run lock, daily limit per source, one failing source doesn't stop the run | Built |
+| Laya started for each run; pending evaluations retried | Built (`scripts/run_crawl.ps1`) |
+| Title cleanup and boilerplate-free excerpts | Built (`clean_title` in `app/normalize.py`, `excerpt` filter in `app/main.py`) |
+| Scheduled task | Script written (`scripts/register_task.ps1`), **not installed** |
+| Email alerts, lead sources, Remotive / Remote OK | Not built |
+| Source health, source ranking, keyword suggestions | Not built |
+| Notifications, drafts written in advance | Not built |
+| Weekly source research | Not built |
 
-| Piece | Status | Where |
-|---|---|---|
-| Greenhouse, Lever, RSS/Atom, and listing-page sources | Done | `app/crawl.py` |
-| Manage sources from the dashboard (writes `sources.json`) | Done | `/sources`, `app/main.py` |
-| ETag / Last-Modified conditional requests | Done | `app/crawl.py` `fetch` |
-| Mark an item seen only after it's processed; failures retry next run | Done | `app/crawl.py` run loop |
-| Run lock, per-source daily limit, one failing source doesn't stop the run | Done | `app/crawl.py` |
-| Start Laya for the run, retry `pending_evaluation` items | Done | `scripts/run_crawl.ps1`, `pipeline.retry_pending` |
-| Preferences: work mode, employment type, locations, salary floor, blocked words | Done | Profile page |
-| Scheduled task script (catches up missed runs, never overlaps, 2 h cap) | Written, **not installed** | `scripts/register_task.ps1` |
-| Per-source health (last success, last error, error count) | **Missing** | `source_state` only has ETag / run count |
-| Sources that find jobs you don't already know about | **Missing** | Greenhouse/Lever only cover companies you name |
-
-**The critical gap:** no `JobCrawler` task exists in Task Scheduler, so nothing crawls on its own today. The only runs logged were manual.
-
-## Source strategy
-
-Prefer structured data over page scraping, and public data over logged-in data:
-
-1. **Public feeds and APIs** (stable, cheap, no browser)
-2. **Listing pages** fetched directly (works today for OnlineJobs.ph)
-3. **Paste the text** for the odd page that needs JavaScript or a login (already built)
-
-Browser automation and logged-in sessions are left out; see "Deferred".
-
-### Discovery sources (checked 2026-09-26)
-
-Greenhouse and Lever only list jobs at companies you already know. These boards cover the whole market:
-
-| Source | Format | Works today? | Terms to respect |
-|---|---|---|---|
-| We Work Remotely: `https://weworkremotely.com/categories/remote-programming-jobs.rss` (other categories too) | RSS | **Yes**: add as an `rss` source, no code | Link back to the posting (the app keeps `source_url`) |
-| Remotive: `https://remotive.com/api/remote-jobs?category=software-dev` (also `&search=python`) | JSON API | Needs a small `remotive` source kind | **4 requests a day at most**; link back and credit Remotive; jobs arrive 24 h late |
-| Remote OK: `https://remoteok.com/api` | JSON API | Needs a small `remoteok` source kind | Link back and credit Remote OK, or they suspend API access |
-| OnlineJobs.ph saved search | Listing page | Yes (already configured) | robots.txt is respected |
-
-Filtering happens in the source URL (category feeds, `search=`), not in new code. If one feed still sends too many irrelevant jobs to Laya, add a per-source keyword filter then.
+Checked by fetching on 2026-09-26: the We Work Remotely RSS feeds, the Remotive API, and the Remote OK API all respond. Remotive asks for at most 4 requests a day, a link back, and credit; Remote OK asks for a link back and credit. The Reddit feeds and the Hacker News API still need checking when they're built.
 
 ## Phases
 
-### Phase 1: Turn it on (no code, ~10 minutes)
+Each phase is useful on its own and ends with a check you can see.
 
-- Register the task: `powershell -ExecutionPolicy Bypass -File scripts\register_task.ps1` (runs at 08:00, 13:00 and 18:00 by default; change them with `-Times`).
-- Add the We Work Remotely programming feed on the Sources page as an RSS source, max 3 runs a day.
-- Check it works: after the next scheduled time, `data\logs\crawl-<date>.log` has a run and the dashboard's Crawler card shows it.
+### Phase 0: Switch on, and make scoring trustworthy
+- Install the scheduled task: `powershell -ExecutionPolicy Bypass -File scripts\register_task.ps1`
+- Add 3–5 OnlineJobs.ph keyword searches from your skills, and the We Work Remotely programming feed.
+- Label 30–50 opportunities, run `eval/run_eval.py`, and adjust Laya's questions and the confidence threshold.
 
-**Done when:** a crawl runs with nobody at the keyboard and new postings appear on the dashboard.
+**Done when:** crawls run without you, and fewer than a third of new items need review.
 
-### Phase 2: Source health (small)
+### Phase 1: Email alerts
+- Add the `imap` source kind, sender parsers for LinkedIn, Indeed, and JobStreet plus the generic fallback, and scoring from the email text when a page can't be fetched.
+- Add a test for each parser, using a saved example email in `tests/fixtures/`.
+- You: create the Gmail label and a filter for alert senders, save a few searches on each board, and set the IMAP environment variables.
 
-A source that silently breaks (a login wall, a layout change, a dead feed) currently looks just like a source with no new jobs.
+**Done when:** a LinkedIn alert email turns into scored opportunities on the next crawl.
 
-- `source_state` gains `last_ok_at`, `last_error`, `error_count` (consecutive failures) and `last_new` (new items last run), added by the existing column migration in `db.init()`.
-- `crawl.py` updates them for each source on every run.
-- **A listing page that yields 0 job links counts as an error.** That is what a layout change or login wall looks like.
-- The Sources page shows one status per source: *Healthy, 3 new last run* / *Failing 2 runs: <error>* / *Not run yet* / *Daily limit reached*.
-- The dashboard's Crawler card shows a warning when any source has failed 2 runs in a row.
-- One test: a failing source raises `error_count`, a good run resets it.
+### Phase 2: Wider sources and source health
+- Add the `remotive` and `remoteok` source kinds (Remotive is capped at 4 runs a day).
+- Add lead sources: Reddit hiring subreddits and the Hacker News monthly threads.
+- Add the source health columns, statuses on the Sources page, and a dashboard warning after 2 failed runs in a row.
 
-**Done when:** breaking a source's URL shows up on the dashboard after two runs.
+**Done when:** breaking a source's URL shows up as a warning on the dashboard, and leads from Reddit or Hacker News appear with the `lead` type.
 
-### Phase 3: Discovery APIs (small)
+### Phase 3: Steering from your clicks
+- Add source ranking on the Sources page, and suggestions to pause weak sources.
+- Add keyword suggestions from your shortlists, turned into one-click source suggestions.
 
-- Add source kinds `remotive` and `remoteok` to `crawl.py`, each mapping the JSON fields to an opportunity (title, company, description, location, salary, date, URL). Items go through the same normalize → dedupe → Laya path as RSS.
-- `remotive` sources default to and are capped at `max_runs_per_day: 4`. Remote OK needs a browser-like User-Agent.
-- Credit: the opportunity page already links to `source_url` and shows the source host (e.g. `remotive.com`), which covers link-back and attribution for personal use.
-- One test per kind with a saved sample response in `tests/fixtures/`.
+**Done when:** the Sources page shows which sources bring shortlisted jobs, and a suggested keyword can be added as a source with one click.
 
-**Done when:** a Remotive search and the Remote OK feed each add scored jobs on a scheduled run.
+### Phase 4: Fast response
+- Write AI drafts in advance for matches scoring 80 or more (at most 3 per run).
+- Show a Windows notification through the WinRT toast API, called from `scripts/run_crawl.ps1`. No new dependencies.
+- The threshold is a setting on the Profile page.
 
-### Phase 4: Notifications (small)
+**Done when:** a strong match found by a scheduled crawl raises a notification that opens the opportunity with its draft ready.
 
-- When a run ends, show a Windows notification if it found jobs scoring ≥ 80 ("3 new strong matches"), or if a source crossed 2 failures. Clicking it opens the dashboard.
-- Built with the WinRT toast API that ships with Windows PowerShell 5.1, called from `scripts/run_crawl.ps1`. No new dependencies.
-- The threshold is a setting on the Profile page, defaulting to 80.
+### Phase 5: Weekly source research
+- Add `app/research.py` and a weekly scheduled task. Suggestions appear on the Sources page for approval.
+- Every suggested URL is fetched and checked before it's shown. The API key is stored in an environment variable.
 
-**Done when:** a strong match found by a scheduled run raises a notification.
+**Done when:** a weekly run adds at least one real, working source suggestion that you haven't seen before.
 
 ## Deferred, and when to revisit
 
 | Idea | Why not now | Revisit when |
 |---|---|---|
-| Build search URLs from saved keywords | Every board has its own URL format, so it's one template per board. Pasting a board's search URL already covers it | You use 5+ boards with keyword searches |
-| Browser-backed sources (Playwright) | Adds ~150 MB of browsers and breaks on layout changes. Paste-the-text covers one-off pages | One specific high-value board has no feed or usable listing page |
-| Logged-in sessions | Sessions expire, and sites like LinkedIn forbid logged-in scraping in their terms | Probably never; use that site's own job alerts instead |
-| Hosted, always-on collection | Laya and Ollama would have to be hosted too, not just the crawler | Missing jobs while the PC is off actually costs you opportunities |
+| A resident AI agent that browses for links | Small local models invent URLs and browse unreliably, and agents that read the open web can be prompt-injected. Email alerts and weekly research cover the same need | A strong model can run locally, and the agent's permissions can be locked down |
+| Browser automation (Playwright) | Adds ~150 MB of browsers and breaks on layout changes. Email alerts cover most login-only sites | A valuable board has no alerts, feed, or usable listing page |
+| Scraping while logged in | Against most sites' terms, and the ban lands on your account | Probably never; use the site's alerts instead |
+| Hosted, always-on collection | Laya and Ollama would have to be hosted too | Missing jobs while the PC is off actually costs you opportunities |
+| Following "next page" links on listings | Keyword searches already vary what the first page shows | A source's first page regularly fills up between crawls |
 
 ## Requirements
 
-- **The PC is on and you're logged in** at the scheduled times. The task doesn't store a password, so it only runs while you're logged on; runs missed while the PC was off or asleep run when it comes back.
-- **Laya installed.** `run_crawl.ps1` starts it for the run. If it can't start, items are saved as `pending_evaluation` and scored on a later run.
-- **Ollama is optional**: it's only used for AI drafts, not for crawling.
-- **The project's `.venv`** with `requirements.txt` installed. No new Python packages are needed for any phase.
-- **Internet access** and respect for each source's terms: Remotive at most 4 times a day, link-back and credit for Remotive and Remote OK, robots.txt for pages.
+- **The PC is on and you're logged in to Windows** at the scheduled times. Runs missed while it was off or asleep happen when it comes back.
+- **Laya** installed; the crawl script starts it. If it's down, items wait as pending and are scored later.
+- **Ollama with `qwen2.5:3b`** for keyword suggestions and drafts written in advance. Everything else works without it.
+- **For email alerts:** a Gmail account (a separate one just for alerts is best) with IMAP turned on, and an app password (this needs 2-Step Verification). It's stored in environment variables (`IMAP_HOST`, `IMAP_USER`, `IMAP_PASSWORD`), never in the database or the repository. You set these up yourself.
+- **For weekly research:** an API key for a model with web search, stored as an environment variable. This is the only part that costs money.
+- **No new Python packages.** IMAP, email parsing, and notifications all use the standard library or what's already installed.
+- **Respect each source's terms:** Remotive at most 4 requests a day, link-back and credit for Remotive and Remote OK, `robots.txt` for every page fetched.
