@@ -1,0 +1,103 @@
+{% extends "base.html" %}
+{% block title %}{{ o.title or 'Opportunity' }}{% endblock %}
+{% block content %}
+{% if notice %}<div class="card notice {{ 'error' if notice_error }}">{{ notice }}</div>{% endif %}
+
+<h1>{{ o.title or 'Untitled opportunity' }}</h1>
+<div class="row">
+  <span class="chip">{{ o.status.replace('_', ' ') }}</span>
+  {% if ev and ev.passed == 0 %}<span class="chip bad">rejected</span>{% endif %}
+  {% if ev and ev.needs_review %}<span class="chip warn">needs review</span>{% endif %}
+  {% if o.duplicate_of %}<span class="chip">duplicate of <a href="/opportunities/{{ o.duplicate_of }}">#{{ o.duplicate_of }}</a></span>{% endif %}
+</div>
+
+<div class="card">
+  {% for value in ['shortlisted', 'ignored', 'new'] if value != o.status %}
+  <form class="inline" method="post" action="/opportunities/{{ o.id }}/status">
+    <input type="hidden" name="status" value="{{ value }}">
+    <button>{{ {'shortlisted': 'Shortlist', 'ignored': 'Ignore', 'new': 'Move back to new'}[value] }}</button>
+  </form>
+  {% endfor %}
+  <form class="inline" method="post" action="/opportunities/{{ o.id }}/evaluate"><button>Re-evaluate with Laya</button></form>
+  &nbsp; Draft:
+  <a href="/opportunities/{{ o.id }}/draft/job_application">job application</a> ·
+  <a href="/opportunities/{{ o.id }}/draft/lead_email">lead email</a>
+</div>
+
+<h2>Score</h2>
+<div class="card">
+  {% if ev is none %}
+    <p class="muted">Not evaluated yet.</p>
+  {% elif ev.result.error %}
+    <p class="chip warn">Laya evaluation failed: {{ ev.result.error }}</p>
+  {% else %}
+    <p><span class="score" style="font-size:20px">{{ '%.1f'|format(ev.score) if ev.score is not none else '–' }}</span> / 100</p>
+    {% if ev.reject_reasons %}<p><b>Rejected:</b> {{ ev.reject_reasons|join('; ') }}</p>{% endif %}
+    <table>
+      <tr><th>Part</th><th>Value</th><th>Weight</th></tr>
+      {% for name, value in ev.components.items() %}
+      <tr><td>{{ name }}</td><td>{{ '%.0f'|format(value * 100) }}%</td><td>{{ weights.get(name, 0) }}</td></tr>
+      {% endfor %}
+    </table>
+    <ul class="small">{% for r in ev.reasons %}<li>{{ r }}</li>{% endfor %}</ul>
+  {% endif %}
+</div>
+
+{% if answers %}
+<h2>Laya answers</h2>
+<div class="card">
+  <table>
+    <tr><th>Question</th><th>Answer</th><th>Confidence</th></tr>
+    {% for name, a in answers.items() %}
+    <tr>
+      <td>{{ name }}</td>
+      <td>{% if a.type == 'score' %}{{ '%.0f'|format(a.value * 100) }}%{% else %}{{ a.value }}{% endif %}</td>
+      <td>{{ '%.0f'|format(a.answer_confidence * 100) }}%{% if a.answer_confidence < threshold %} <span class="chip warn">low</span>{% endif %}</td>
+    </tr>
+    {% endfor %}
+  </table>
+  <p class="muted small">Model {{ ev.result.model }}, questions {{ ev.result.question_version }}, {{ ev.created_at }} UTC</p>
+</div>
+{% endif %}
+
+<h2>Your labels</h2>
+<form class="card" method="post" action="/opportunities/{{ o.id }}/labels">
+  <p class="muted small">Correct Laya here. Labeled items are exported by <a href="/labels.jsonl">Export labels</a> in the format <code>eval/run_eval.py</code> reads.</p>
+  <div class="filters">
+    <select name="type" aria-label="Type label">
+      <option value="">Type: not labeled</option>
+      {% for t in type_options %}<option value="{{ t }}" {{ 'selected' if o.labels.get('type') == t }}>{{ t }}</option>{% endfor %}
+    </select>
+    <select name="work_mode" aria-label="Work mode label">
+      <option value="">Work mode: not labeled</option>
+      {% for w in work_mode_options %}<option value="{{ w }}" {{ 'selected' if o.labels.get('work_mode') == w }}>{{ w }}</option>{% endfor %}
+    </select>
+    <select name="relevant" aria-label="Relevant label">
+      <option value="">Relevant: not labeled</option>
+      <option value="yes" {{ 'selected' if o.labels.get('relevant') is sameas true }}>relevant</option>
+      <option value="no" {{ 'selected' if o.labels.get('relevant') is sameas false }}>not relevant</option>
+    </select>
+    <button>Save labels</button>
+  </div>
+</form>
+
+<h2>Details</h2>
+<div class="card">
+  <table>
+    <tr><td>Company</td><td>{{ o.company or '–' }}</td></tr>
+    <tr><td>Location</td><td>{{ o.location or '–' }}{% if o.remote %} (remote){% endif %}</td></tr>
+    <tr><td>Salary</td><td>{% if o.salary_min is not none or o.salary_max is not none %}{{ '{:,.0f}'.format(o.salary_min) if o.salary_min is not none else '?' }} – {{ '{:,.0f}'.format(o.salary_max) if o.salary_max is not none else '?' }} {{ o.currency or '' }}{% else %}–{% endif %}</td></tr>
+    <tr><td>Contact</td><td>{{ o.contact_email or '–' }}</td></tr>
+    <tr><td>Published</td><td>{{ o.published_at or '–' }}</td></tr>
+    <tr><td>Source</td><td>{% if source_link %}<a href="{{ source_link }}" rel="noopener noreferrer" target="_blank">{{ o.source_url }}</a>{% else %}{{ o.source_url or 'pasted text' }}{% endif %}</td></tr>
+    <tr><td>Extracted by</td><td class="small">{% for k, v in o.extracted_by.items() %}{{ k }}: {{ v }}{{ ', ' if not loop.last }}{% else %}–{% endfor %}</td></tr>
+  </table>
+  {% if o.warnings %}<p class="small"><b>Warnings:</b> {{ o.warnings|join('; ') }}</p>{% endif %}
+</div>
+<div class="card"><pre class="text">{{ o.description }}</pre></div>
+
+{% if drafts %}
+<h2>Drafts</h2>
+<div class="card"><ul>{% for d in drafts %}<li><a href="/drafts/{{ d.id }}">{{ d.kind.replace('_', ' ') }}</a> <span class="muted small">updated {{ d.updated_at }} UTC</span></li>{% endfor %}</ul></div>
+{% endif %}
+{% endblock %}

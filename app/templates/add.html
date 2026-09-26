@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block title %}Add opportunity{% endblock %}
+{% block content %}
+<h1>Add opportunity</h1>
+{% if error %}<div class="card notice error">{{ error }}</div>{% endif %}
+<form method="post" class="card">
+  <label for="url">Page URL</label>
+  <input type="url" id="url" name="url" value="{{ url }}" placeholder="https://…">
+  <p class="muted small">The page is fetched once, if the site's robots.txt allows it. Pages that need JavaScript may come back empty; paste the text instead.</p>
+  <label for="text">Or paste the posting</label>
+  <textarea id="text" name="text" placeholder="First line: the title. Then the description.">{{ text }}</textarea>
+  <p><button class="primary">Add and evaluate</button></p>
+</form>
+{% endblock %}

@@ -47,7 +47,7 @@ Each source should define:
 - URL, feed URL, or API endpoint;
 - source type: job board, company careers page, directory, or lead page;
 - access method: official API, RSS/Atom feed, or HTML page;
-- fetch frequency;
+- fetch frequency (default: every scheduled run; can be lowered per source, see "Scheduled runs");
 - allowed domains and URL patterns;
 - CSS or XPath selectors when a site needs custom extraction;
 - status and last successful run.
@@ -66,6 +66,18 @@ Do not scrape sites whose terms forbid it (for example LinkedIn, Indeed, and Gla
 Fetches pages and feeds responsibly and records the original URL, timestamp, HTTP status, and raw body. It must respect robots.txt, per-domain rate limits, site terms, and retry limits, and send an honest User-Agent.
 
 Use a queue so a failed page does not stop the run. Store raw pages locally so extraction can be improved without downloading the same pages again.
+
+#### Scheduled runs
+
+Runs happen **at least three times a day**, by default at 08:00, 13:00, and 18:00 local time. The times are configurable.
+
+- **Trigger:** Windows Task Scheduler runs `scripts/run_crawl.ps1`, which calls `python -m app.crawl`. The crawl is a command-line entry point, so it works whether or not the dashboard is open.
+- **Missed runs:** the task is set to "run as soon as possible after a scheduled start is missed", so a run skipped while the PC was asleep or off happens at the next startup. Waking the PC for runs is optional.
+- **One run at a time:** a lock file stops a new run from starting while the previous one is still going.
+- **Per-source frequency:** a source can opt out of some runs (for example, once a day) when its terms or rate limits call for it. Three runs a day is the ceiling for a source, not a requirement.
+- **Incremental fetching:** use `ETag` / `If-Modified-Since` and feed item IDs so repeat runs only fetch new or changed items.
+- **Laya availability:** the run starts Laya if it is not running and waits for `/health`. If Laya still is not available, new opportunities are stored as "pending evaluation" and evaluated on the next run instead of being lost.
+- **Run log:** each run records start and end time, sources fetched, new items, duplicates, errors, and items pending evaluation in `crawl_runs`. The dashboard shows the last run's status and highlights new items since the user's last visit.
 
 ### 3. Extractor
 
@@ -179,11 +191,12 @@ Use SQLite as the source of truth.
 
 - `opportunities`: normalized fields, raw text, source URL, duplicate link, status;
 - `evaluations`: Laya answers, `answer_confidence`, question-set version, model name, timestamp, score components, and reasons;
-- `drafts`: draft text, type, status, and timestamps.
+- `drafts`: draft text, type, status, and timestamps;
+- `crawl_runs`: start and end time, sources fetched, new items, duplicates, pending evaluations, and errors.
 
-The profile is a JSON file in Phase 1 (skills, services, locations, rates, preferences, and Laya question wording).
+Sources are listed in a `sources.json` file in Phase 1. The profile is a JSON file in Phase 1 (skills, services, locations, rates, preferences, and Laya question wording).
 
-**Added in later phases:** `sources`, `crawl_runs`, `raw_pages`, `opportunity_tags`, `duplicates` (for similarity-based matches with confidence), `profiles` (when a profile editor exists), and draft revision history.
+**Added in later phases:** `sources`, `raw_pages`, `opportunity_tags`, `duplicates` (for similarity-based matches with confidence), `profiles` (when a profile editor exists), and draft revision history.
 
 Every model-assisted result records the model name, question-set version, timestamp, and confidence so results can be reproduced and reviewed.
 
@@ -223,7 +236,8 @@ Lead records can contain personal data, which falls under GDPR and similar laws.
 ### Operations and testing
 
 - PowerShell scripts to start Laya, Ollama, and the app on Windows;
-- Windows Task Scheduler for scheduled fetch runs (Phase 2);
+- Windows Task Scheduler for scheduled fetch runs, at least three times a day (Phase 1);
+- no Docker: everything runs natively in a Python virtual environment (see "Decisions to preserve");
 - `.env` for local configuration;
 - pytest for extraction, deduplication, scoring, and API tests;
 - JSON or Markdown exports for backups and inspection.
@@ -265,14 +279,15 @@ Lead records can contain personal data, which falls under GDPR and similar laws.
 - **evaluation set:** 30–50 real opportunities labeled by hand, and a script that reports Laya's accuracy per question;
 - hard filters and the simple Phase 1 score;
 - server-rendered dashboard;
-- template-based Markdown draft export.
+- template-based Markdown draft export;
+- scheduled crawl at least three times a day over a short `sources.json` list (RSS feeds and Greenhouse/Lever boards), with missed-run catch-up, a run lock, `pending_evaluation` when Laya is down, and a `crawl_runs` log.
 
 **Exit check:** Laya's accuracy on the evaluation set is good enough to rank by. If it is not, fine-tune Laya on the labeled set, or replace that question with a rule, before Phase 2.
 
 ### Phase 2: Reliable collection
 
-- source configurations, starting with official APIs and feeds;
-- fetch queue and scheduled runs;
+- source configurations managed in the dashboard (replacing `sources.json`), with more source types;
+- fetch queue with per-domain rate limits;
 - custom selectors;
 - LLM fallback extraction through Ollama;
 - Playwright for sources that need it;
@@ -299,7 +314,7 @@ Lead records can contain personal data, which falls under GDPR and similar laws.
 
 ## First implementation target
 
-The first demonstrable version accepts pasted opportunity text or a URL, saves it to SQLite, detects URL duplicates, asks Laya its questions in one request, calculates a fit score, displays the result in a local dashboard, and generates an editable Markdown draft. Alongside it, a labeled evaluation set measures whether Laya's answers are good enough. This validates the complete workflow, and the model's accuracy, before investing in broad collection.
+The first demonstrable version accepts pasted opportunity text or a URL, saves it to SQLite, detects URL duplicates, asks Laya its questions in one request, calculates a fit score, displays the result in a local dashboard, and generates an editable Markdown draft. Alongside it, a labeled evaluation set measures whether Laya's answers are good enough, and a scheduled crawl runs the same pipeline at least three times a day over a few feeds. This validates the complete workflow, and the model's accuracy, before investing in broad collection.
 
 ## Decisions to preserve
 
@@ -309,4 +324,5 @@ The first demonstrable version accepts pasted opportunity text or a URL, saves i
 - Measure model accuracy on labeled data before relying on it.
 - Make all external actions manual and explicit.
 - Use local services and local storage by default.
+- Run natively on Windows, without Docker. Laya uses the local NVIDIA GPU directly, and GPU passthrough in Docker on Windows adds setup without benefit for a single-user local app. Revisit only when moving to a server or sharing the app with other users.
 - Prefer official APIs and feeds over scraping; treat source terms, robots.txt, rate limits, and personal-data handling as part of the design.

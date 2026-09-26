@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Opportunities</h1>
+
+<div class="card small">
+  {% if new_count %}<b>{{ new_count }} new</b> since your last visit. {% endif %}
+  {% if last_run %}
+    Last crawl: {{ last_run.ended_at or last_run.started_at }} UTC,
+    {{ last_run.new_items }} new, {{ last_run.duplicates }} duplicates, {{ last_run.pending }} pending
+    {% if last_run.errors %}<span class="chip bad">{{ last_run.errors|length }} error{{ '' if last_run.errors|length == 1 else 's' }}</span>
+      <details><summary>Show errors</summary><ul>{% for e in last_run.errors %}<li>{{ e }}</li>{% endfor %}</ul></details>
+    {% endif %}
+  {% else %}
+    No scheduled crawl has run yet.
+  {% endif %}
+</div>
+
+<form class="filters card" method="get">
+  <select name="status" aria-label="Status">
+    <option value="">Any status</option>
+    {% for s in statuses %}<option value="{{ s }}" {{ 'selected' if s == f.status }}>{{ s.replace('_', ' ') }}</option>{% endfor %}
+  </select>
+  <select name="kind" aria-label="Type">
+    <option value="">Any type</option>
+    {% for k in kinds %}<option value="{{ k }}" {{ 'selected' if k == f.kind }}>{{ k }}</option>{% endfor %}
+  </select>
+  <label class="check"><input type="checkbox" name="review" value="1" {{ 'checked' if f.review }}> Needs review only</label>
+  <label class="check"><input type="checkbox" name="rejected" value="1" {{ 'checked' if f.rejected }}> Show rejected</label>
+  <button>Filter</button>
+</form>
+
+{% for o in rows %}
+<div class="card">
+  <div class="row">
+    <span class="score">{{ '%.0f'|format(o.score) if o.score is not none else '–' }}</span>
+    <a href="/opportunities/{{ o.id }}"><b>{{ o.title or 'Untitled opportunity' }}</b></a>
+    {% if o.kind %}<span class="chip">{{ o.kind }}</span>{% endif %}
+    {% if o.status != 'new' %}<span class="chip {{ 'warn' if o.status == 'pending_evaluation' else '' }}">{{ o.status.replace('_', ' ') }}</span>{% endif %}
+    {% if o.needs_review %}<span class="chip warn">needs review</span>{% endif %}
+    {% if o.passed == 0 %}<span class="chip bad">rejected</span>{% endif %}
+  </div>
+  <div class="muted small">{{ o.company or '' }}{% if o.company and o.location %} · {% endif %}{{ o.location or '' }}</div>
+  <p class="small">{{ o.description[:240] }}{% if o.description|length > 240 %}…{% endif %}</p>
+</div>
+{% else %}
+<p class="muted">Nothing here yet. <a href="/add">Add an opportunity</a>, or add sources to <code>sources.json</code> for the scheduled crawl.</p>
+{% endfor %}
+{% endblock %}

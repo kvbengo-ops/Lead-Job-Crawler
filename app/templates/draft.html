@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block title %}Draft{% endblock %}
+{% block content %}
+<h1>{{ kind.replace('_', ' ')|capitalize }} draft</h1>
+<p><a href="/opportunities/{{ o.id }}">Back to {{ o.title or 'the opportunity' }}</a>
+{% if draft %} · <a href="/drafts/{{ draft.id }}.md">Download Markdown</a>{% endif %}</p>
+{% if saved %}<div class="card notice">Saved.</div>{% endif %}
+<form method="post" class="card" action="{{ '/drafts/%d'|format(draft.id) if draft else '/opportunities/%d/draft/%s'|format(o.id, kind) }}">
+  <textarea name="content" aria-label="Draft text" style="min-height:420px">{{ content }}</textarea>
+  <p><button class="primary">Save draft</button> <span class="muted small">Nothing is sent anywhere. Copy it or download it when you're happy with it.</span></p>
+</form>
+{% endblock %}

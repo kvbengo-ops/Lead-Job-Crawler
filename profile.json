@@ -1,0 +1,53 @@
+{
+  "name": "Your Name",
+  "headline": "Python developer",
+  "skills": ["python", "fastapi", "sql", "web scraping", "automation"],
+  "services": ["backend development", "data pipelines"],
+  "work_modes": ["remote"],
+  "preferred_locations": [],
+  "excluded_locations": [],
+  "min_salary": null,
+  "currency": "USD",
+  "blocked_words": [],
+  "confidence_threshold": 0.6,
+  "skills_for_full_match": 3,
+  "score_weights": {
+    "relevance": 60,
+    "skills": 20,
+    "salary": 10,
+    "location": 10
+  },
+  "reject_types": ["spam", "irrelevant"],
+  "question_version": "2026-09-25.1",
+  "questions": {
+    "type": {
+      "type": "choice",
+      "instructions": "What kind of opportunity is this?",
+      "criteria": {
+        "job": "employment position at a company",
+        "freelance": "paid project or contract gig",
+        "lead": "business that may need services",
+        "partnership": "collaboration offer",
+        "recruiter": "agency or recruiter post",
+        "spam": "scam, ads, or junk",
+        "irrelevant": "not an opportunity"
+      }
+    },
+    "relevance": {
+      "type": "score",
+      "state": "description",
+      "instructions": "How well does this match someone offering these skills: {skills}; services: {services}?",
+      "criteria": ["no match", "weak match", "partial match", "strong match"]
+    },
+    "work_mode": {
+      "type": "choice",
+      "instructions": "Where is the work done?",
+      "criteria": {
+        "remote": "fully remote",
+        "hybrid": "mix of office and remote",
+        "onsite": "must work at the office",
+        "unclear": "not stated"
+      }
+    }
+  }
+}
