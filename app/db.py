@@ -18,7 +18,7 @@ CREATE TABLE IF NOT EXISTS opportunities (
  contact_email TEXT, published_at TEXT, raw_text TEXT NOT NULL DEFAULT '',
  extracted_by TEXT NOT NULL DEFAULT '{}', warnings TEXT NOT NULL DEFAULT '[]',
  duplicate_of INTEGER, status TEXT NOT NULL DEFAULT 'new', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
- labels TEXT NOT NULL DEFAULT '{}', employment_types TEXT NOT NULL DEFAULT '[]',
+ labels TEXT NOT NULL DEFAULT '{}', employment_types TEXT NOT NULL DEFAULT '[]', source_key TEXT,
  FOREIGN KEY (duplicate_of) REFERENCES opportunities(id)
 );
 CREATE INDEX IF NOT EXISTS idx_opportunities_canonical ON opportunities(canonical_url);
@@ -41,13 +41,20 @@ CREATE TABLE IF NOT EXISTS crawl_runs (
  duplicates INTEGER NOT NULL DEFAULT 0, pending INTEGER NOT NULL DEFAULT 0, errors TEXT NOT NULL DEFAULT '[]'
 );
 CREATE TABLE IF NOT EXISTS source_state (
- source_key TEXT PRIMARY KEY, etag TEXT, last_modified TEXT, runs_date TEXT, runs_today INTEGER NOT NULL DEFAULT 0
+ source_key TEXT PRIMARY KEY, etag TEXT, last_modified TEXT, runs_date TEXT, runs_today INTEGER NOT NULL DEFAULT 0,
+ last_ok_at TEXT, last_error TEXT, error_count INTEGER NOT NULL DEFAULT 0, last_new INTEGER,
+ listing INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS seen_items (
  source_key TEXT NOT NULL, item_id TEXT NOT NULL, seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
  PRIMARY KEY (source_key, item_id)
 );
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE IF NOT EXISTS source_suggestions (
+ id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, url TEXT NOT NULL, name TEXT, why TEXT,
+ origin TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'new', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ UNIQUE (kind, url)
+);
 CREATE TABLE IF NOT EXISTS profiles (
  id INTEGER PRIMARY KEY, data TEXT, resume TEXT NOT NULL DEFAULT '', resume_updated_at TEXT,
  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -56,14 +63,17 @@ CREATE TABLE IF NOT EXISTS profiles (
 
 # Columns added after the first version of the schema; init() adds any an older database lacks.
 ADDED_COLUMNS = {
-    "opportunities": {"labels": "TEXT NOT NULL DEFAULT '{}'", "employment_types": "TEXT NOT NULL DEFAULT '[]'"},
+    "opportunities": {"labels": "TEXT NOT NULL DEFAULT '{}'", "employment_types": "TEXT NOT NULL DEFAULT '[]'",
+                      "source_key": "TEXT"},
     "evaluations": {"passed": "INTEGER", "needs_review": "INTEGER NOT NULL DEFAULT 0",
                     "reject_reasons": "TEXT NOT NULL DEFAULT '[]'"},
+    "source_state": {"last_ok_at": "TEXT", "last_error": "TEXT", "error_count": "INTEGER NOT NULL DEFAULT 0",
+                     "last_new": "INTEGER", "listing": "INTEGER NOT NULL DEFAULT 0"},
 }
 PROFILE_ID = 1  # ponytail: one profile; add a user_id column when the app gets accounts
 OP_FIELDS = ("source_url", "canonical_url", "title", "company", "description", "location", "remote",
              "salary_min", "salary_max", "currency", "contact_email", "published_at", "raw_text",
-             "extracted_by", "warnings", "duplicate_of", "status", "employment_types")
+             "extracted_by", "warnings", "duplicate_of", "status", "employment_types", "source_key")
 
 
 @contextmanager
@@ -91,6 +101,11 @@ def init() -> None:
                 for name, decl in columns.items():
                     if name not in have:
                         con.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
+                        if (table, name) == ("opportunities", "source_key"):
+                            # Older crawls recorded the source only in seen_items, keyed by the job's URL.
+                            con.execute("UPDATE opportunities SET source_key = (SELECT s.source_key FROM seen_items s "
+                                        "WHERE s.item_id IN (opportunities.source_url, opportunities.canonical_url) "
+                                        "LIMIT 1)")
         con.executescript(SCHEMA)
         con.execute("DROP INDEX IF EXISTS idx_opportunities_canonical_url")  # from an early development version
 
@@ -318,13 +333,34 @@ def list_drafts(oid: int) -> list[dict]:
 def get_source_state(key: str) -> dict:
     with connect() as con:
         r = con.execute("SELECT * FROM source_state WHERE source_key=?", (key,)).fetchone()
-    return dict(r) if r else {"source_key": key, "etag": None, "last_modified": None, "runs_date": None, "runs_today": 0}
+    return dict(r) if r else {"source_key": key, "etag": None, "last_modified": None, "runs_date": None, "runs_today": 0,
+                              "last_ok_at": None, "last_error": None, "error_count": 0, "last_new": None, "listing": 0}
 
 
 def put_source_state(state: dict) -> None:
     with connect() as con:
-        con.execute("INSERT OR REPLACE INTO source_state (source_key, etag, last_modified, runs_date, runs_today) "
-                    "VALUES (:source_key, :etag, :last_modified, :runs_date, :runs_today)", state)
+        con.execute("INSERT OR REPLACE INTO source_state (source_key, etag, last_modified, runs_date, runs_today, "
+                    "last_ok_at, last_error, error_count, last_new, listing) VALUES (:source_key, :etag, :last_modified, "
+                    ":runs_date, :runs_today, :last_ok_at, :last_error, :error_count, :last_new, :listing)", state)
+
+
+def source_states() -> dict[str, dict]:
+    with connect() as con:
+        return {r["source_key"]: dict(r) for r in con.execute("SELECT * FROM source_state")}
+
+
+def source_stats() -> dict[str, dict]:
+    """Per source: jobs found (not counting duplicates), their average score, and what you did with them."""
+    with connect() as con:
+        rows = con.execute("""
+          SELECT o.source_key, COUNT(*) AS found, AVG(e.score) AS avg_score,
+                 SUM(o.status = 'shortlisted') AS shortlisted, SUM(o.status = 'ignored') AS ignored,
+                 SUM(COALESCE(e.passed, 1) = 0) AS rejected
+          FROM opportunities o
+          LEFT JOIN evaluations e ON e.id = (SELECT MAX(id) FROM evaluations WHERE opportunity_id = o.id)
+          WHERE o.source_key IS NOT NULL AND o.duplicate_of IS NULL
+          GROUP BY o.source_key""")
+        return {r["source_key"]: dict(r) for r in rows}
 
 
 def is_seen(key: str, item_id: str) -> bool:
@@ -335,6 +371,33 @@ def is_seen(key: str, item_id: str) -> bool:
 def mark_seen(key: str, item_id: str) -> None:
     with connect() as con:
         con.execute("INSERT OR IGNORE INTO seen_items (source_key, item_id) VALUES (?,?)", (key, item_id))
+
+
+# --- source suggestions (from keyword suggestions and weekly research) ------------------
+
+def add_suggestions(suggestions: list[dict], origin: str) -> int:
+    """Store new suggestions; one already suggested (added or dismissed) is ignored. Returns how many were new."""
+    with connect() as con:
+        before = con.total_changes
+        con.executemany("INSERT OR IGNORE INTO source_suggestions (kind, url, name, why, origin) VALUES (?,?,?,?,?)",
+                        [(s["kind"], s["url"], s.get("name"), s.get("why"), origin) for s in suggestions])
+        return con.total_changes - before
+
+
+def list_suggestions() -> list[dict]:
+    with connect() as con:
+        return [dict(r) for r in con.execute("SELECT * FROM source_suggestions WHERE status='new' ORDER BY id DESC")]
+
+
+def get_suggestion(sid: int) -> dict | None:
+    with connect() as con:
+        r = con.execute("SELECT * FROM source_suggestions WHERE id=?", (sid,)).fetchone()
+    return dict(r) if r else None
+
+
+def set_suggestion_status(sid: int, status: str) -> None:
+    with connect() as con:
+        con.execute("UPDATE source_suggestions SET status=? WHERE id=?", (status, sid))
 
 
 def record_run(run: dict) -> None:

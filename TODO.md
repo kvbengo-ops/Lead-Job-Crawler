@@ -1,5 +1,7 @@
 # Phase 1 TODO
 
+> **Phase 1 is finished. Current work is in [DISCOVERY_TODO.md](DISCOVERY_TODO.md)** (its open "You" tasks U2–U5 moved there).
+
 Goal: the "First implementation target" in [PLAN.md](PLAN.md). Paste text or a URL, save it to SQLite, dedupe by URL, ask Laya, score it, show it in a dashboard, and export a Markdown draft. Also measure Laya's accuracy on hand-labeled postings. At the end, run the same pipeline automatically at least three times a day over a short list of sources.
 
 **Owners:** **Claude** = Laya integration, scoring, evaluation. **Codex** = storage, extraction, dashboard, drafts, tests. **You** = labeling and review.

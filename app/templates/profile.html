@@ -63,6 +63,9 @@
       <div class="field"><label for="confidence_threshold">Review below confidence</label>
         <input type="number" id="confidence_threshold" name="confidence_threshold" min="0" max="1" step="0.05" value="{{ p.confidence_threshold }}">
         <p class="help">0 to 1. Less sure answers get "needs review".</p></div>
+      <div class="field"><label for="notify_score">Notify at score</label>
+        <input type="number" id="notify_score" name="notify_score" min="0" max="100" step="1" value="{{ p.notify_score }}">
+        <p class="help">New matches this good get a Windows notification and an AI draft (up to 3 per crawl).</p></div>
     </div>
     <div class="field"><label for="blocked_words">Blocked words</label>
       <input type="text" id="blocked_words" name="blocked_words" value="{{ p.blocked_words|join(', ') }}">

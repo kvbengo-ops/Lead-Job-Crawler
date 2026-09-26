@@ -138,6 +138,17 @@ def test_missing_robots_allows_and_server_error_blocks(web):
         from_url("https://down.example/job")
 
 
+def test_meta_charset_is_used_when_the_header_has_none(web):
+    routes, _ = web
+    page = '<html><head><meta charset="windows-1252"><title>Lead – Remote</title></head><body><p>Job</p></body></html>'
+    routes["https://old.example/job"] = httpx.Response(200, content=page.encode("cp1252"),
+                                                       headers={"content-type": "text/html"})
+    routes["https://odd.example/job"] = httpx.Response(200, content=b'<meta charset="nonsense"><p>Job</p>',
+                                                       headers={"content-type": "text/html"})
+    assert from_url("https://old.example/job")["title"] == "Lead – Remote"
+    assert from_url("https://odd.example/job")["description"] == "Job"  # unknown charset: falls back to UTF-8
+
+
 def test_fetch_errors(web):
     routes, _ = web
     routes["https://site.example/gone"] = httpx.Response(410)

@@ -11,22 +11,73 @@
 </header>
 {% if saved %}{{ alert('Source list saved.', 'success') }}{% endif %}
 {{ alert(error, 'error') }}
+{{ alert(notice, 'success') }}
+
+<section class="card" aria-labelledby="suggest-title" style="margin-bottom:16px">
+  <div class="card-head">
+    <h2 id="suggest-title">Suggested sources</h2>
+    <form method="post" action="/sources/suggest-keywords" data-busy="Reading your shortlist…">
+      <button class="sm">{{ icon('sparkles') }}Suggest searches from my shortlist</button>
+    </form>
+  </div>
+  {% if suggestions %}
+  <ul class="items">
+    {% for x in suggestions %}
+    <li class="item">
+      <span class="muted">{{ icon('sparkles') }}</span>
+      <div class="body">
+        <span class="title">{{ x.name or x.url }}</span> <span class="chip">{{ x.kind }}</span>
+        <span class="chip primary">{{ 'from your shortlist' if x.origin == 'keywords' else 'weekly research' }}</span>
+        <div class="meta" style="overflow-wrap:anywhere">{{ x.url }}</div>
+        {% if x.why %}<p class="small muted" style="margin:4px 0 0">{{ x.why }}</p>{% endif %}
+      </div>
+      <div class="actions">
+        <form class="inline" method="post" action="/sources/suggestions/{{ x.id }}/add"><button class="sm primary">{{ icon('plus') }}Add</button></form>
+        <form class="inline" method="post" action="/sources/suggestions/{{ x.id }}/dismiss"><button class="sm ghost">Dismiss</button></form>
+      </div>
+    </li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <p class="muted small">No suggestions right now. Shortlist jobs you like, then ask for searches based on them. Every suggestion waits here for your approval.</p>
+  {% endif %}
+</section>
 
 <div class="grid split">
   <section class="card" aria-labelledby="list-title">
-    <div class="card-head"><h2 id="list-title">Your sources</h2><span class="muted small">{{ sources|length }} configured</span></div>
-    {% if sources %}
+    <div class="card-head"><h2 id="list-title">Your sources</h2><span class="muted small">{{ rows|length }} configured · best results first</span></div>
+    {% if rows %}
     <ul class="items">
-      {% for source in sources %}
+      {% for r in rows %}
+      {% set source, state, st = r.source, r.state, r.stats %}
+      {% set label = source.name or source.board or source.url %}
       <li class="item">
         <span class="muted">{{ icon('rss' if source.kind == 'rss' else 'list' if source.kind in ('greenhouse', 'lever') else 'file') }}</span>
         <div class="body">
-          <span class="title">{{ source.name or source.board or source.url }}</span> <span class="chip">{{ source.kind }}</span>
+          <span class="title">{{ label }}</span> <span class="chip">{{ source.kind }}</span>
           <div class="meta" style="overflow-wrap:anywhere">{{ source.url or ('Board: ' ~ source.board) }} · up to {{ source.max_runs_per_day or 3 }} runs a day</div>
+          <div class="chips">
+            {% if source.paused %}<span class="chip">Paused</span>
+            {% elif state.error_count %}<span class="chip bad">{{ icon('alert') }}Failing {{ state.error_count }} run{{ '' if state.error_count == 1 else 's' }}</span>
+            {% elif state.last_ok_at %}<span class="chip good">{{ icon('check') }}Healthy · {{ state.last_new or 0 }} new last run</span>
+            {% else %}<span class="chip">Not run yet</span>{% endif %}
+            {% if r.limit_reached and not source.paused %}<span class="chip warn">{{ icon('clock') }}Daily limit reached</span>{% endif %}
+          </div>
+          {% if state.error_count and state.last_error %}<p class="small" style="color:var(--bad);margin:6px 0 0">{{ state.last_error }}</p>{% endif %}
+          {% if st.found %}
+          <p class="small muted" style="margin:6px 0 0">{{ st.found }} found · average score {{ '%.0f'|format(st.avg_score) if st.avg_score is not none else '–' }}
+            · {{ st.shortlisted or 0 }} shortlisted · {{ st.ignored or 0 }} ignored · {{ st.rejected or 0 }} rejected</p>
+          {% endif %}
+          {% if r.suggest_pause %}<p class="small" style="color:var(--warn);margin:6px 0 0">{{ st.found }} jobs and none shortlisted. Consider pausing it.</p>{% endif %}
         </div>
-        <form class="inline" method="post" action="/sources/{{ loop.index0 }}/delete">
-          <button class="icon ghost danger" title="Delete" aria-label="Delete {{ source.name or source.board or source.url }}">{{ icon('trash') }}</button>
-        </form>
+        <div class="actions">
+          <form class="inline" method="post" action="/sources/{{ r.index }}/pause">
+            <button class="sm ghost" aria-label="{{ 'Resume' if source.paused else 'Pause' }} {{ label }}">{{ 'Resume' if source.paused else 'Pause' }}</button>
+          </form>
+          <form class="inline" method="post" action="/sources/{{ r.index }}/delete">
+            <button class="icon ghost danger" title="Delete" aria-label="Delete {{ label }}">{{ icon('trash') }}</button>
+          </form>
+        </div>
       </li>
       {% endfor %}
     </ul>
@@ -44,11 +95,23 @@
     <form method="post" action="/sources">
       <div class="field"><label for="kind">Type</label>
         <select id="kind" name="kind" style="width:100%">
-          <option value="page">One page</option><option value="rss">RSS or Atom feed</option>
+          <option value="page">Page or search results</option><option value="rss">RSS or Atom feed</option>
+          <option value="remotive">Remotive API</option><option value="remoteok">Remote OK API</option>
+          <option value="hn">Hacker News monthly thread</option>
+          <option value="imap">Job alert emails (Gmail label)</option>
           <option value="greenhouse">Greenhouse board</option><option value="lever">Lever board</option>
-        </select></div>
+        </select>
+        <p class="help" id="kind-help"></p></div>
       <div class="field" id="url-field"><label for="url">URL</label>
         <input id="url" name="url" type="url" placeholder="https://example.com/jobs.rss"></div>
+      <div class="field" id="thread-field"><label for="thread">Thread</label>
+        <select id="thread" name="thread" style="width:100%">
+          <option value="who_is_hiring">Who is hiring? (jobs)</option>
+          <option value="seeking_freelancer">Freelancer? Seeking freelancer? (clients looking for help)</option>
+        </select></div>
+      <div class="field" id="label-field"><label for="label">Mail label</label>
+        <input id="label" name="label" type="text" placeholder="job-alerts">
+        <p class="help">Needs IMAP_USER and IMAP_PASSWORD set on this PC. See the README, "Email alerts".</p></div>
       <div class="field" id="board-field"><label for="board">Board name</label>
         <input id="board" name="board" type="text" placeholder="company-board-name">
         <p class="help">The part after boards.greenhouse.io/ or jobs.lever.co/.</p></div>
@@ -64,10 +127,22 @@
   // Show only the field the chosen type uses; without JavaScript both stay visible.
   (function () {
     var kind = document.getElementById("kind");
+    var help = {
+      page: "A job page, or a board's search results. New jobs on the results page are added each run.",
+      rss: "Job boards' feeds, such as https://weworkremotely.com/categories/remote-programming-jobs.rss.",
+      remotive: "For example https://remotive.com/api/remote-jobs?category=software-dev&search=python. At most 4 checks a day.",
+      remoteok: "https://remoteok.com/api lists every remote job on Remote OK.",
+      hn: "The latest monthly thread is found automatically each run.",
+      imap: "Reads the last 14 days of job alert emails. Nothing in your mailbox is changed.",
+      greenhouse: "Lists one company's jobs.", lever: "Lists one company's jobs."
+    };
     function sync() {
-      var board = kind.value === "greenhouse" || kind.value === "lever";
-      document.getElementById("url-field").hidden = board;
+      var k = kind.value, board = k === "greenhouse" || k === "lever";
+      document.getElementById("url-field").hidden = board || k === "hn" || k === "imap";
+      document.getElementById("label-field").hidden = k !== "imap";
       document.getElementById("board-field").hidden = !board;
+      document.getElementById("thread-field").hidden = k !== "hn";
+      document.getElementById("kind-help").textContent = help[k] || "";
     }
     kind.addEventListener("change", sync); sync();
   })();

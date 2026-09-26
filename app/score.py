@@ -7,6 +7,9 @@ import re
 
 # Used for any component profile.json's "score_weights" doesn't mention.
 DEFAULT_WEIGHTS = {"relevance": 60, "skills": 20, "salary": 10, "location": 10, "employment": 10}
+# An unsure work_mode answer is already scored as "unknown" (0.5) below, so it can't hurt an item and doesn't
+# need a person to look at it. Measured on 30 real postings: 25 were flagged only for work_mode (2026-09-26).
+NO_REVIEW_WHEN_UNSURE = {"work_mode"}
 
 
 def _mentions(term: str, text: str) -> bool:
@@ -35,7 +38,7 @@ def score(opportunity: dict, evaluation: dict, profile: dict) -> dict:
         reasons.append(f"Laya evaluation failed: {evaluation['error']}")
     for name, a in (evaluation.get("answers") or {}).items():
         if a["answer_confidence"] < threshold:
-            needs_review = True
+            needs_review = needs_review or name not in NO_REVIEW_WHEN_UNSURE
             reasons.append(f"Low Laya confidence on {name}: {a['answer_confidence']:.0%} < {threshold:.0%}")
 
     # --- hard filters -------------------------------------------------------

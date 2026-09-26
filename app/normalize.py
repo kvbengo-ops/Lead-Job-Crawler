@@ -78,6 +78,18 @@ def clean_title(title: str | None, source_url: str | None) -> str | None:
     return title
 
 
+# Job-board page chrome that says nothing about the job.
+# ponytail: a phrase list; add phrases as new boards show up.
+BOILERPLATE = re.compile(r"^(<|back to|please (log ?in|sign ?in|register)|sign in|apply now|share this)", re.I)
+
+
+def strip_boilerplate(text: str, title: str | None = None) -> str:
+    """The text without navigation lines, blank lines, or a line that only repeats the title."""
+    title = (title or "").strip().lower()
+    return "\n".join(line for line in (l.strip() for l in text.splitlines())
+                     if line and not BOILERPLATE.match(line) and line.lower() != title)
+
+
 def iso_date(value) -> str | None:
     """ISO 8601 (UTC when a time is given) from ISO strings, RSS/email dates, or epoch milliseconds."""
     if value in (None, ""):

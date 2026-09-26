@@ -136,3 +136,13 @@ def test_empty_profile_does_not_crash():
     result = score(op(), ev(), {})
     assert result["passed"] is True
     assert 0 <= result["score"] <= 100
+
+
+def test_unsure_work_mode_is_noted_but_not_flagged_for_review():
+    evaluation = ev()
+    evaluation["answers"]["work_mode"]["answer_confidence"] = 0.3
+    result = score(op(remote=False), evaluation, PROFILE)
+    assert not result["needs_review"] and result["components"]["location"] == 0.5
+    assert any("Low Laya confidence on work_mode" in r for r in result["reasons"])
+    evaluation["answers"]["relevance"]["answer_confidence"] = 0.3
+    assert score(op(remote=False), evaluation, PROFILE)["needs_review"]

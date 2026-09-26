@@ -101,16 +101,18 @@ def test_drafts_create_edit_download(client):
 def test_profile_page_keeps_questions_and_weights(client):
     before = pipeline.load_profile()
     r = client.post("/profile", data={"name": "Kyle", "skills": "python, go", "work_modes": ["remote", "hybrid"],
-                                      "min_salary": "70000", "currency": "usd", "confidence_threshold": "0.7"},
+                                      "min_salary": "70000", "currency": "usd", "confidence_threshold": "0.7",
+                                      "notify_score": "75"},
                     follow_redirects=False)
     assert r.status_code == 303
     after = pipeline.load_profile()
     assert after["name"] == "Kyle" and after["skills"] == ["python", "go"]
     assert after["work_modes"] == ["remote", "hybrid"] and after["min_salary"] == 70000.0
-    assert after["currency"] == "USD" and after["confidence_threshold"] == 0.7
+    assert after["currency"] == "USD" and after["confidence_threshold"] == 0.7 and after["notify_score"] == 75
     assert after["questions"] == before["questions"] and after["reject_types"] == before["reject_types"]
     bad = client.post("/profile", data={"confidence_threshold": "5"})
     assert bad.status_code == 422 and pipeline.load_profile() == after
+    assert client.post("/profile", data={"notify_score": "150"}).status_code == 422
 
 
 def test_cross_site_posts_are_refused(client):
@@ -191,3 +193,53 @@ def test_delete_removes_opportunity_and_its_drafts(client):
     r = client.post(f"/opportunities/{oid}/delete", follow_redirects=False)
     assert r.status_code == 303 and db.get_opportunity(oid) is None and db.list_drafts(oid) == []
     assert "Opportunity deleted" in client.get(r.headers["location"]).text
+
+
+def test_sources_page_shows_health_and_pauses_and_dashboard_warns(client):
+    from app import crawl
+    url = "https://jobs.example/feed.xml"
+    crawl.SOURCES_PATH.write_text(json.dumps([{"kind": "rss", "url": url, "name": "Example feed"}]), encoding="utf-8")
+    assert "Not run yet" in client.get("/sources").text
+    state = db.get_source_state(f"rss:{url}")
+    state.update(error_count=2, last_error="https://jobs.example/feed.xml returned HTTP 404")
+    db.put_source_state(state)
+    assert "Failing 2 runs" in client.get("/sources").text
+    assert "has failed 2 crawls in a row" in client.get("/").text
+    client.post("/sources/0/pause")
+    assert json.loads(crawl.SOURCES_PATH.read_text(encoding="utf-8"))[0]["paused"] is True
+    page = client.get("/sources").text
+    assert "Paused" in page and "Resume" in page
+    client.post("/sources/0/pause")
+    assert "paused" not in json.loads(crawl.SOURCES_PATH.read_text(encoding="utf-8"))[0]
+
+
+def test_new_source_kinds_can_be_added_from_the_form(client):
+    from app import crawl
+    client.post("/sources", data={"kind": "remotive", "url": "https://remotive.com/api/remote-jobs?search=python",
+                                  "max_runs_per_day": "6"})
+    client.post("/sources", data={"kind": "hn", "thread": "seeking_freelancer", "max_runs_per_day": "1"})
+    client.post("/sources", data={"kind": "imap", "label": "job-alerts"})
+    saved = json.loads(crawl.SOURCES_PATH.read_text(encoding="utf-8"))
+    assert saved[0]["max_runs_per_day"] == 4 and saved[1]["thread"] == "seeking_freelancer"
+    assert [s["kind"] for s in crawl.load_sources()] == ["remotive", "hn", "imap"]
+    assert "Pick a Hacker News thread" in client.post("/sources", data={"kind": "hn", "thread": "x"}).text
+
+
+def test_keyword_suggestions_become_sources_with_one_click(client, ollama):
+    from app import crawl
+    crawl.SOURCES_PATH.write_text(json.dumps([{"kind": "page", "url":
+        "https://www.onlinejobs.ph/jobseekers/jobsearch?jobkeyword=python"}]), encoding="utf-8")
+    assert "Shortlist a few jobs first" in client.post("/sources/suggest-keywords").text
+    oid = add(client, "Web scraping developer\nBuild crawlers with Python and FastAPI.")
+    client.post(f"/opportunities/{oid}/status", data={"status": "shortlisted"})
+    ollama.reply = {"message": {"content": '{"keywords": ["web scraping", "python", "fastapi"]}'}, "done": True}
+    page = client.post("/sources/suggest-keywords").text
+    assert "4 new suggestions from 1 shortlisted job" in page  # "python" is already searched: 2 terms x 2 boards
+    [first] = [x for x in db.list_suggestions() if x["url"].endswith("jobkeyword=web+scraping")]
+    client.post(f"/sources/suggestions/{first['id']}/add")
+    assert crawl.load_sources()[-1]["url"].endswith("jobkeyword=web+scraping")
+    [other] = [x for x in db.list_suggestions() if x["kind"] == "remotive" and x["url"].endswith("fastapi")]
+    client.post(f"/sources/suggestions/{other['id']}/dismiss")
+    client.post("/sources/suggest-keywords")  # the same terms again
+    urls = [x["url"] for x in db.list_suggestions()]
+    assert other["url"] not in urls and first["url"] not in urls  # dismissed and added ones don't come back

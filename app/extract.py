@@ -5,6 +5,7 @@ None with a warning. Fetching checks robots.txt and identifies itself honestly.
 """
 from __future__ import annotations
 
+import codecs
 import json
 import re
 from html import unescape
@@ -313,7 +314,7 @@ def finish(op: dict) -> dict:
     return normalize(op)
 
 
-def from_html(html: str, source_url: str | None = None) -> dict:
+def from_html(html: str, source_url: str | None = None, min_links: int = MIN_LISTING_LINKS) -> dict:
     page = _Page()
     page.feed(html)
     page.close()
@@ -349,7 +350,7 @@ def from_html(html: str, source_url: str | None = None) -> dict:
     # No JobPosting data: a page that isn't itself a job link but links to several is a list of jobs.
     if source_url and not JOB_LINK.search(urlsplit(source_url).path):
         links = job_links(page, source_url)
-        if len(links) >= MIN_LISTING_LINKS:
+        if links and len(links) >= min_links:
             raise ListingPage(source_url, links)
 
     title = (page.meta.get("og:title") or page.title or "").strip() or None
@@ -385,12 +386,22 @@ def from_text(text: str, source_url: str | None = None) -> dict:
     return finish(op)
 
 
-def from_url(url: str) -> dict:
+def from_url(url: str, min_links: int = MIN_LISTING_LINKS) -> dict:
     """Fetch one page (robots.txt permitting) and extract it. Raises FetchError on failure, and ListingPage
-    when the page is a list of jobs rather than one."""
+    when the page links to at least `min_links` jobs (a list page the crawler already knows passes 1)."""
     r = fetch(url)
     ctype = r.headers.get("content-type", "").lower()
     if ctype and not any(t in ctype for t in ("html", "xml", "text/plain")):
         raise FetchError(f"{url} is {ctype.split(';')[0]}, not a web page")
-    final = str(r.url)
-    return from_html(r.text, final) if "html" in ctype or _looks_like_html(r.text) else from_text(r.text, final)
+    final, text = str(r.url), _decode(r, ctype)
+    return from_html(text, final, min_links) if "html" in ctype or _looks_like_html(text) else from_text(text, final)
+
+
+def _decode(r: httpx.Response, ctype: str) -> str:
+    """The page as text. Without a charset in the header httpx assumes UTF-8, but older sites declare theirs
+    only in a <meta> tag; an unknown charset name falls back to httpx's choice."""
+    m = None if "charset" in ctype else re.search(rb"<meta[^>]+charset=[\"']?([\w-]+)", r.content[:4096], re.I)
+    try:
+        return r.content.decode(codecs.lookup(m.group(1).decode()).name, errors="replace") if m else r.text
+    except LookupError:
+        return r.text

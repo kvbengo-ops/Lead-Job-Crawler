@@ -38,9 +38,11 @@ def load_resume() -> str:
     return resume["text"] if resume else ""
 
 
-def process(text: str | None = None, url: str | None = None, op: dict | None = None) -> tuple[int, bool]:
+def process(text: str | None = None, url: str | None = None, op: dict | None = None,
+            source: str | None = None) -> tuple[int, bool]:
     """Store one opportunity and evaluate it unless it is a duplicate. Returns (id, is_duplicate); for a URL
-    that is already stored, that is the original's id and nothing is fetched or stored.
+    that is already stored, that is the original's id and nothing is fetched or stored. `source` is the
+    crawler source's key, kept so each source's results can be counted.
     Raises extract.FetchError when a URL can't be fetched, ValueError when there is nothing to process."""
     if op is not None:
         record = normalize(op)
@@ -53,7 +55,7 @@ def process(text: str | None = None, url: str | None = None, op: dict | None = N
         record = from_text(text)
     else:
         raise ValueError("Nothing to add: paste some text or a URL.")
-    oid, duplicate = db.insert_opportunity(record)
+    oid, duplicate = db.insert_opportunity({**record, "source_key": source})
     if not duplicate:
         evaluate_opportunity(oid)
     return oid, duplicate

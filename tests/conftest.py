@@ -59,6 +59,7 @@ def isolated(tmp_path, monkeypatch):
     monkeypatch.setattr(pipeline, "RESUME_PATH", tmp_path / "resume.txt")  # never import the real resume
     monkeypatch.setattr(crawl, "SOURCES_PATH", tmp_path / "sources.json")
     monkeypatch.setattr(crawl, "LOCK_PATH", tmp_path / "crawl.lock")
+    monkeypatch.setattr(crawl, "NOTIFY_SCRIPT", tmp_path / "no-notify.ps1")  # tests never show real notifications
     monkeypatch.setattr(extract, "SAME_HOST_DELAY", 0)
     monkeypatch.setattr(extract, "_robots", {})
     db.init()

@@ -11,6 +11,13 @@
   <a class="btn primary" href="/add">{{ icon('plus') }}Add opportunity</a>
 </header>
 
+{% for r in failing %}
+<div class="alert warn" role="alert">{{ icon('alert') }}<div>
+  <strong>{{ r.source.name or r.source.board or r.source.url }}</strong> has failed {{ r.state.error_count }} crawls in a row:
+  {{ r.state.last_error }} <a href="/sources">Check the source</a>
+</div></div>
+{% endfor %}
+
 {% if setup %}
 <section class="card" aria-labelledby="setup-title" style="margin-bottom:24px">
   <div class="card-head"><h2 id="setup-title">Finish setting up</h2><span class="muted small">{{ setup|selectattr(3)|list|length }} of {{ setup|length }} done</span></div>

@@ -3,20 +3,19 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import tempfile
 import time
 from pathlib import Path
-from urllib.parse import urlencode, urlsplit
+from urllib.parse import parse_qs, urlencode, urlsplit
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse, Response
 from jinja2 import Environment, FileSystemLoader
 from markupsafe import Markup
 
-from . import db, drafts, extract, ollama_client, pipeline, resume
+from . import crawl, db, drafts, extract, keywords, ollama_client, pipeline, resume
 from .extract import MAX_LISTING_LINKS, FetchError, ListingPage
-from .normalize import canonical_url
+from .normalize import canonical_url, strip_boilerplate
 from .normalize import EMPLOYMENT_TYPES
 
 EMPLOYMENT_LABELS = {"full_time": "Full-time", "part_time": "Part-time", "contract": "Contract",
@@ -36,16 +35,9 @@ templates = Environment(loader=FileSystemLoader(Path(__file__).parent / "templat
 templates.globals["icon"] = lambda name: Markup(f'<svg class="i" aria-hidden="true"><use href="#i-{name}"/></svg>')
 templates.filters["ts"] = lambda value: (value or "")[:16].replace("T", " ")  # "2026-09-26 08:01"
 templates.filters["host"] = lambda url: urlsplit(url or "").netloc.removeprefix("www.")
-# ponytail: regex list of job-board chrome; add phrases as new boards show up.
-BOILERPLATE = re.compile(r"^(<|back to|please (log ?in|sign ?in|register)|sign in|apply now|share this)", re.I)
-
-
 def excerpt(o: dict, limit: int = 220) -> str:
     """Start of the description without navigation lines or a repeat of the title."""
-    title = (o.get("title") or "").lower()
-    lines = [l for l in (o.get("description") or "").splitlines()
-             if l.strip() and not BOILERPLATE.match(l.strip()) and l.strip().lower() not in title]
-    text = " ".join(lines)
+    text = " ".join(strip_boilerplate(o.get("description") or "", o.get("title")).split())
     return text if len(text) <= limit else text[:limit].rsplit(" ", 1)[0] + "…"
 
 
@@ -118,7 +110,7 @@ def dashboard():
                          "review": sum(bool(r["needs_review"]) and r["status"] != "ignored" for r in rows),
                          "pending": sum(r["status"] == "pending_evaluation" for r in rows)},
                   top=[r for r in rows if r["status"] == "new"][:5], drafts=db.recent_drafts(5),
-                  last_run=db.last_run(), source_count=len(sources),
+                  last_run=db.last_run(), source_count=len(sources), failing=failing_sources(sources),
                   setup=[] if all(step[-1] for step in setup) else setup)
 
 
@@ -363,6 +355,7 @@ def _profile_view(p: dict) -> dict:
     view = {"name": "", "headline": "", "experience": "", "skills": [], "services": [], "work_modes": [],
             "employment_types": [], "preferred_locations": [],
             "excluded_locations": [], "min_salary": None, "currency": "USD", "confidence_threshold": 0.6,
+            "notify_score": crawl.DEFAULT_NOTIFY_SCORE,
             "blocked_words": []}
     view.update({k: v for k, v in p.items() if k in view and v is not None})
     return view
@@ -419,7 +412,8 @@ def save_profile(name: str = Form(""), headline: str = Form(""), experience: str
                  work_modes: list[str] = Form([]), employment_types: list[str] = Form([]),
                  preferred_locations: str = Form(""),
                  excluded_locations: str = Form(""), min_salary: str = Form(""), currency: str = Form(""),
-                 confidence_threshold: str = Form("0.6"), blocked_words: str = Form("")):
+                 confidence_threshold: str = Form("0.6"), blocked_words: str = Form(""),
+                 notify_score: str = Form(str(crawl.DEFAULT_NOTIFY_SCORE))):
     try:
         profile = pipeline.load_profile()
     except (OSError, ValueError) as e:
@@ -433,11 +427,13 @@ def save_profile(name: str = Form(""), headline: str = Form(""), experience: str
     try:
         updates["min_salary"] = float(min_salary) if min_salary.strip() else None
         updates["confidence_threshold"] = float(confidence_threshold)
-        if not 0 <= updates["confidence_threshold"] <= 1:
+        updates["notify_score"] = int(notify_score)
+        if not 0 <= updates["confidence_threshold"] <= 1 or not 0 <= updates["notify_score"] <= 100:
             raise ValueError
     except ValueError:
         return render_profile({**profile, **updates}, status_code=422,
-                              error="Minimum salary must be a number, and the confidence threshold between 0 and 1.")
+                              error="Minimum salary must be a number, the confidence threshold between 0 and 1, "
+                                    "and the notify score a whole number from 0 to 100.")
     profile.update(updates)  # questions, weights, and other keys are kept as they are
     db.save_profile(profile)
     return RedirectResponse("/profile?saved=1", status_code=303)
@@ -457,23 +453,89 @@ def _write_atomically(path: Path, text: str) -> None:
 
 # --- crawler sources ------------------------------------------------------------
 
-SOURCES_PATH = db.ROOT / "sources.json"
 
 def _read_sources() -> list[dict]:
-    if not SOURCES_PATH.exists():
+    if not crawl.SOURCES_PATH.exists():
         return []
     try:
-        value = json.loads(SOURCES_PATH.read_text(encoding="utf-8"))
+        value = json.loads(crawl.SOURCES_PATH.read_text(encoding="utf-8"))
         return value if isinstance(value, list) else []
     except (OSError, ValueError):
         return []
 
+PAUSE_AFTER = 30  # suggest pausing a source that found this many jobs without one shortlist
+
+
+def _source_rows(sources: list[dict]) -> list[dict]:
+    """Each sources.json entry with its health and results, best results first. `index` is its place in the file."""
+    states, stats, today = db.source_states(), db.source_stats(), time.strftime("%Y-%m-%d")
+    rows = []
+    for index, s in enumerate(sources):
+        key = f"{s.get('kind')}:{crawl.source_url(s)}"
+        state, stat = states.get(key) or {}, stats.get(key) or {"found": 0, "shortlisted": 0}
+        limit = state.get("runs_date") == today and state.get("runs_today", 0) >= (s.get("max_runs_per_day") or 3)
+        rows.append({"index": index, "source": s, "state": state, "stats": stat, "limit_reached": limit,
+                     "suggest_pause": not s.get("paused") and stat["found"] >= PAUSE_AFTER and not stat["shortlisted"]})
+    return sorted(rows, key=lambda r: (-(r["stats"]["shortlisted"] or 0), -(r["stats"].get("avg_score") or 0)))
+
+
+def failing_sources(sources: list[dict]) -> list[dict]:
+    """Sources that failed two runs in a row or more, for the dashboard warning."""
+    return [r for r in _source_rows(sources) if (r["state"].get("error_count") or 0) >= 2]
+
+
 @app.get("/sources", response_class=HTMLResponse)
-def sources_page(saved: str = "", error: str = ""):
-    return render("sources.html", sources=_read_sources(), saved=bool(saved), error=error)
+def sources_page(saved: str = "", error: str = "", notice: str = ""):
+    sources = _read_sources()
+    configured = {f"{s.get('kind')}:{crawl.source_url(s)}" for s in sources}
+    suggestions = [x for x in db.list_suggestions() if f"{x['kind']}:{x['url']}" not in configured]
+    return render("sources.html", rows=_source_rows(sources), suggestions=suggestions, saved=bool(saved),
+                  error=error, notice=notice, pause_after=PAUSE_AFTER)
+
+
+def _search_terms(sources: list[dict]) -> list[str]:
+    """Search words the configured sources already use (OnlineJobs.ph jobkeyword=, Remotive search=)."""
+    terms = []
+    for s in sources:
+        query = parse_qs(urlsplit(str(s.get("url") or "")).query)
+        terms += [t for key in ("jobkeyword", "search") for t in query.get(key, [])]
+    return terms
+
+
+@app.post("/sources/suggest-keywords")
+def suggest_keywords():
+    shortlisted = db.list_opportunities(status="shortlisted")
+    if not shortlisted:
+        return sources_page(error="Shortlist a few jobs first: keyword suggestions come from what you shortlist.")
+    # Contract with keywords.py and ollama_client.suggest_keywords: existing terms go in profile["sources"].
+    profile = {**profile_or_empty(), "sources": _search_terms(_read_sources())}
+    try:
+        terms, note = ollama_client.suggest_keywords(shortlisted, profile), ""
+    except ollama_client.OllamaError:
+        terms, note = keywords.suggest_keywords(shortlisted, profile), " Ollama didn't answer, so these come from word counts."
+    added = db.add_suggestions(keywords.search_sources(terms), "keywords")
+    return sources_page(notice=f"{added} new suggestion{'' if added == 1 else 's'} from {len(shortlisted)} "
+                               f"shortlisted job{'' if len(shortlisted) == 1 else 's'}.{note}")
+
+
+@app.post("/sources/suggestions/{sid}/{action}")
+def act_on_suggestion(sid: int, action: str):
+    suggestion = db.get_suggestion(sid)
+    if suggestion is None or action not in ("add", "dismiss"):
+        raise HTTPException(404, "No such suggestion")
+    if action == "add":
+        if suggestion["kind"] not in crawl.KINDS:
+            return sources_page(error=f"The crawler can't read {suggestion['kind']} sources yet.")
+        sources = _read_sources()
+        sources.append({"kind": suggestion["kind"], "url": suggestion["url"], "name": suggestion["name"] or "",
+                        "max_runs_per_day": crawl.DEFAULT_RUNS_PER_DAY})
+        _write_atomically(crawl.SOURCES_PATH, json.dumps(sources, indent=2, ensure_ascii=False) + "\n")
+    db.set_suggestion_status(sid, "added" if action == "add" else "dismissed")
+    return RedirectResponse("/sources?saved=1", status_code=303)
 
 @app.post("/sources")
-def save_source(kind: str = Form(...), url: str = Form(""), board: str = Form(""), name: str = Form(""), max_runs_per_day: str = Form("3")):
+def save_source(kind: str = Form(...), url: str = Form(""), board: str = Form(""), name: str = Form(""),
+                max_runs_per_day: str = Form("3"), thread: str = Form(""), label: str = Form("")):
     try:
         runs = int(max_runs_per_day)
         if runs < 1: raise ValueError
@@ -483,13 +545,30 @@ def save_source(kind: str = Form(...), url: str = Form(""), board: str = Form(""
     if kind in {"greenhouse", "lever"}:
         if not board.strip(): return sources_page(error="A board name is required for Greenhouse or Lever.")
         source["board"] = board.strip()
-    elif kind in {"rss", "page"}:
+    elif kind in {"rss", "page", "remotive", "remoteok"}:
         if not url.startswith(("http://", "https://")): return sources_page(error="URL must start with http:// or https://.")
         source["url"] = url.strip()
+        if kind == "remotive":
+            source["max_runs_per_day"] = min(runs, crawl.REMOTIVE_MAX_RUNS)
+    elif kind == "hn":
+        if thread not in crawl.HN_THREADS: return sources_page(error="Pick a Hacker News thread.")
+        source["thread"] = thread
+    elif kind == "imap":
+        if not label.strip(): return sources_page(error="Enter the mail label that holds your job alerts.")
+        source["label"] = label.strip()
     else:
-        return sources_page(error="Source type must be page, rss, greenhouse, or lever.")
+        return sources_page(error="Unknown source type.")
     sources = _read_sources(); sources.append(source)
-    _write_atomically(SOURCES_PATH, json.dumps(sources, indent=2, ensure_ascii=False) + "\n")
+    _write_atomically(crawl.SOURCES_PATH, json.dumps(sources, indent=2, ensure_ascii=False) + "\n")
+    return RedirectResponse("/sources?saved=1", status_code=303)
+
+@app.post("/sources/{index}/pause")
+def toggle_pause(index: int):
+    sources = _read_sources()
+    if index < 0 or index >= len(sources): raise HTTPException(404, "No such source")
+    if sources[index].pop("paused", False) is False:
+        sources[index]["paused"] = True
+    _write_atomically(crawl.SOURCES_PATH, json.dumps(sources, indent=2, ensure_ascii=False) + "\n")
     return RedirectResponse("/sources?saved=1", status_code=303)
 
 @app.post("/sources/{index}/delete")
@@ -497,5 +576,5 @@ def delete_source(index: int):
     sources = _read_sources()
     if index < 0 or index >= len(sources): raise HTTPException(404, "No such source")
     sources.pop(index)
-    _write_atomically(SOURCES_PATH, json.dumps(sources, indent=2, ensure_ascii=False) + "\n")
+    _write_atomically(crawl.SOURCES_PATH, json.dumps(sources, indent=2, ensure_ascii=False) + "\n")
     return RedirectResponse("/sources?saved=1", status_code=303)

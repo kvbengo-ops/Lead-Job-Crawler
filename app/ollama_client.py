@@ -230,3 +230,28 @@ def analyze_resume(text: str, client: httpx.Client | None = None) -> dict:
         "experience": text_field("experience", 1500),
         "location": text_field("location", 100),
     }
+
+
+def suggest_keywords(shortlisted: list[dict], profile: dict, client: httpx.Client | None = None) -> list[str]:
+    """Ask Ollama for 5–10 concise search terms derived from shortlisted jobs."""
+    existing = profile.get("sources", []) if isinstance(profile, dict) else []
+    jobs = []
+    for job in shortlisted[:30]:
+        jobs.append(f"Title: {job.get('title') or ''}\nDescription: {(job.get('description') or '')[:1200]}")
+    prompt = ("Return JSON only as {\"keywords\":[...]} with 5 to 10 short job-search terms. "
+              "Use recurring role, skill, or service phrases from these shortlisted jobs. "
+              f"Do not return terms already present in SOURCES: {existing}.\n\n" + "\n\n".join(jobs))
+    answer = _chat([{"role": "system", "content": "You suggest precise job-search keywords."},
+                    {"role": "user", "content": prompt}], client, fmt="json")
+    try:
+        data = json.loads(answer[answer.find("{"):answer.rfind("}") + 1])
+    except (ValueError, TypeError) as e:
+        raise OllamaError("Ollama returned invalid keyword JSON.") from e
+    values = data.get("keywords") if isinstance(data, dict) else []
+    out = []
+    seen = {str(x).strip().lower() for x in existing}
+    for value in values if isinstance(values, list) else []:
+        value = re.sub(r"\s+", " ", str(value)).strip(" ,.;")
+        if value and value.lower() not in seen and value.lower() not in {x.lower() for x in out}:
+            out.append(value[:80])
+    return out[:10]

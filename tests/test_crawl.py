@@ -5,7 +5,7 @@ import time
 import httpx
 import pytest
 
-from app import crawl, db
+from app import crawl, db, pipeline
 
 GREENHOUSE_URL = "https://boards-api.greenhouse.io/v1/boards/acme/jobs?content=true"
 LEVER_URL = "https://api.lever.co/v0/postings/globex?mode=json"
@@ -187,3 +187,229 @@ def test_list_page_source_adds_its_jobs_and_new_ones_later(web, laya):
     slugs.append("rust-dev-444444")
     crawl.run()
     assert sorted(titles()) == ["Job 0", "Job 1", "Job 2", "Job 3"] and db.last_run()["new_items"] == 1
+
+
+def test_source_health_counts_failures_in_a_row_and_resets(web, laya):
+    routes, _ = web
+    write_sources([{"kind": "rss", "url": FEED_URL, "max_runs_per_day": 9}])
+    crawl.run()
+    crawl.run()  # the feed isn't there yet: 404 twice
+    state = db.get_source_state(f"rss:{FEED_URL}")
+    assert state["error_count"] == 2 and "HTTP 404" in state["last_error"] and state["last_ok_at"] is None
+    routes[FEED_URL] = httpx.Response(200, content=ATOM.encode(), headers={"content-type": "application/atom+xml"})
+    crawl.run()
+    state = db.get_source_state(f"rss:{FEED_URL}")
+    assert state["error_count"] == 0 and state["last_error"] is None and state["last_ok_at"] and state["last_new"] == 1
+
+
+def test_list_page_that_stops_linking_to_jobs_is_an_error_not_a_job(web, laya):
+    from tests.test_extract import list_page
+    routes, _ = web
+    page = {"html": list_page("python-dev-111111", "sql-dev-222222", "go-dev-333333")}
+    routes["https://site.example/jobs"] = lambda request: httpx.Response(
+        200, text=page["html"], headers={"content-type": "text/html"})
+    for n, slug in enumerate(["python-dev-111111", "sql-dev-222222", "go-dev-333333", "rust-dev-444444"]):
+        routes[f"https://site.example/board/job/{slug}"] = httpx.Response(
+            200, text=f"<html><title>Job {n}</title><body><main><p>Python work</p></main></body></html>",
+            headers={"content-type": "text/html"})
+    write_sources([{"kind": "page", "url": "https://site.example/jobs", "max_runs_per_day": 9}])
+    crawl.run()
+    assert len(titles()) == 3
+    page["html"] = "<html><title>Sign in</title><body><main><p>Please sign in to see jobs.</p></main></body></html>"
+    assert crawl.run() == 1
+    assert "no job links" in db.last_run()["errors"][0] and len(titles()) == 3  # the login page isn't stored
+    assert db.get_source_state("page:https://site.example/jobs")["error_count"] == 1
+    page["html"] = list_page("rust-dev-444444")  # one job is enough once the page is known to be a list
+    assert crawl.run() == 0 and "Job 3" in titles()
+
+
+def test_paused_source_is_skipped(feeds, laya):
+    write_sources([{"kind": "rss", "url": FEED_URL, "paused": True}])
+    assert crawl.run() == 0
+    assert db.last_run()["sources_fetched"] == 0 and titles() == []
+
+
+def test_each_opportunity_records_its_source_and_sources_are_counted(feeds, laya):
+    crawl.run()
+    stats = db.source_stats()
+    assert stats[f"greenhouse:{GREENHOUSE_URL}"]["found"] == 2 and stats[f"rss:{FEED_URL}"]["found"] == 1
+    assert all(s["avg_score"] is not None for s in stats.values())
+
+
+REMOTIVE_URL = "https://remotive.com/api/remote-jobs?search=python"
+REMOTIVE = {"jobs": [{"id": 7, "url": "https://remotive.com/remote-jobs/software-dev/python-dev-7", "title": "Python Dev",
+                      "company_name": "Initech", "candidate_required_location": "Worldwide",
+                      "publication_date": "2026-09-20T10:00:00", "description": "<p>Python and FastAPI.</p>"}]}
+REMOTEOK = [{"legal": "API Terms of Service: link back to Remote OK."},
+            {"id": "99", "url": "https://remoteok.com/remote-jobs/99", "position": "Automation Engineer",
+             "company": "Hooli", "location": "Remote", "date": "2026-09-21T08:00:00+00:00",
+             "description": "<p>Python automation.</p>"}]
+
+
+def json_route(data):
+    return httpx.Response(200, content=json.dumps(data).encode(), headers={"content-type": "application/json"})
+
+
+def test_remotive_and_remoteok_sources(web, laya):
+    routes, _ = web
+    routes[REMOTIVE_URL] = json_route(REMOTIVE)
+    routes["https://remoteok.com/api"] = json_route(REMOTEOK)
+    write_sources([{"kind": "remotive", "url": REMOTIVE_URL, "max_runs_per_day": 6},
+                   {"kind": "remoteok", "url": "https://remoteok.com/api"}])
+    assert crawl.run() == 0
+    assert titles() == ["Automation Engineer", "Python Dev"]  # Remote OK's legal notice isn't a job
+    assert crawl.load_sources()[0]["max_runs_per_day"] == 4  # Remotive allows 4 requests a day
+
+
+def hn_routes(routes, thread, title, comments):
+    params, _, _ = crawl.HN_THREADS[thread]
+    search = str(httpx.URL(crawl.HN_SEARCH, params={**params, "hitsPerPage": 20}))
+    routes[search] = json_route({"hits": [{"objectID": "500", "title": "Ask HN: Something else"},
+                                          {"objectID": "501", "title": title}]})
+    routes[crawl.HN_COMMENTS.format("501")] = json_route({"hits": comments})
+
+
+def test_hn_who_is_hiring_keeps_top_level_comments(web, laya):
+    routes, _ = web
+    hn_routes(routes, "who_is_hiring", "Ask HN: Who is hiring? (September 2026)", [
+        {"objectID": "1", "parent_id": 501, "comment_text": "Acme | Python Engineer | Remote (US)<p>We build APIs.",
+         "created_at": "2026-09-01T16:00:00Z"},
+        {"objectID": "2", "parent_id": 1, "comment_text": "Is this role open to Europe?"},  # a reply
+    ])
+    write_sources([{"kind": "hn", "thread": "who_is_hiring"}])
+    assert crawl.run() == 0
+    [o] = db.list_opportunities(show_rejected=True)
+    assert (o["title"], o["company"]) == ("Python Engineer", "Acme")
+
+
+def test_hn_freelancer_thread_keeps_only_clients(web, laya):
+    routes, _ = web
+    hn_routes(routes, "seeking_freelancer", "Ask HN: Freelancer? Seeking freelancer? (September 2026)", [
+        {"objectID": "3", "parent_id": 501, "comment_text": "SEEKING FREELANCER | Web scraping | Remote<p>Need a crawler."},
+        {"objectID": "4", "parent_id": 501, "comment_text": "SEEKING WORK | Python developer | Remote"},
+    ])
+    write_sources([{"kind": "hn", "thread": "seeking_freelancer"}])
+    assert crawl.run() == 0
+    assert titles() == ["Web scraping"]
+
+
+def test_hn_thread_not_found_is_a_source_error(web, laya):
+    routes, _ = web
+    params, _, _ = crawl.HN_THREADS["who_is_hiring"]
+    routes[str(httpx.URL(crawl.HN_SEARCH, params={**params, "hitsPerPage": 20}))] = json_route({"hits": []})
+    write_sources([{"kind": "hn", "thread": "who_is_hiring"}])
+    assert crawl.run() == 1 and "no Hacker News thread" in db.last_run()["errors"][0]
+
+
+def test_hn_source_needs_a_known_thread(laya):
+    write_sources([{"kind": "hn", "thread": "whatever"}])
+    assert crawl.run() == 1 and "hn needs \"thread\"" in db.last_run()["errors"][0]
+
+
+def test_strong_new_match_gets_an_ai_draft_and_one_notification(web, laya, ollama, monkeypatch, tmp_path):
+    calls = []
+    script = tmp_path / "notify.ps1"
+    script.write_text("# fake", encoding="utf-8")
+    monkeypatch.setattr(crawl, "NOTIFY_SCRIPT", script)
+    monkeypatch.setattr(crawl.os, "name", "nt")
+    monkeypatch.setattr(crawl.subprocess, "run", lambda args, **kw: calls.append(args) or
+                        type("Done", (), {"returncode": 0, "stderr": ""})())
+    routes, _ = web
+    routes[FEED_URL] = httpx.Response(200, content=ATOM.encode(), headers={"content-type": "application/atom+xml"})
+    write_sources([{"kind": "rss", "url": FEED_URL}])
+    db.save_profile({**pipeline.load_profile(), "notify_score": 70})
+    crawl.run()
+    [o] = db.list_opportunities()
+    assert o["score"] >= 70
+    [draft] = db.list_drafts(o["id"])
+    assert draft["status"] == "ai_generated" and draft["kind"] == "job_application"
+    [args] = calls
+    assert args[args.index("-Title") + 1] == "1 new strong match"
+    assert "1 AI draft ready" in args[args.index("-Body") + 1]
+    assert args[args.index("-Url") + 1].endswith(f"/opportunities/{o['id']}")
+
+
+def test_no_notification_without_strong_matches_and_ollama_down_is_fine(web, laya, monkeypatch):
+    calls = []
+    monkeypatch.setattr(crawl, "notify", lambda *a: calls.append(a))
+    routes, _ = web
+    routes[FEED_URL] = httpx.Response(200, content=ATOM.encode(), headers={"content-type": "application/atom+xml"})
+    write_sources([{"kind": "rss", "url": FEED_URL}])
+    db.save_profile({**pipeline.load_profile(), "notify_score": 101})  # nothing can reach it
+    assert crawl.run() == 0 and calls == []
+    db.save_profile({**pipeline.load_profile(), "notify_score": 0})
+    another = ATOM.replace("urn:job:1", "urn:job:2").replace("jobs.example/1", "jobs.example/2")
+    routes[FEED_URL] = httpx.Response(200, content=another.encode(), headers={"content-type": "application/atom+xml"})
+    write_sources([{"kind": "rss", "url": FEED_URL, "max_runs_per_day": 9}])
+    assert crawl.run() == 0  # Ollama is down in tests: no draft, but the notification still comes
+    [(title, body, url)] = calls
+    assert "strong match" in title and "draft" not in body
+
+
+def test_source_reaching_two_failures_is_notified_once(web, laya, monkeypatch):
+    calls = []
+    monkeypatch.setattr(crawl, "notify", lambda *a: calls.append(a))
+    write_sources([{"kind": "rss", "url": FEED_URL, "max_runs_per_day": 9}])
+    for _ in range(3):
+        crawl.run()  # 404 each time
+    [(title, body, url)] = calls
+    assert title == "A crawler source keeps failing" and "HTTP 404" in body and url.endswith("/sources")
+
+
+class FakeMailbox:
+    """Stands in for imaplib.IMAP4_SSL with one alert email in the "job-alerts" label."""
+    EMAIL = b"From: jobs-noreply@linkedin.com\r\nSubject: 2 new jobs\r\nMessage-ID: <a1@example>\r\n\r\nNew jobs for you.\r\n"
+
+    def __init__(self, host, timeout=None):
+        self.host = host
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def login(self, user, password):
+        assert (user, password) == ("me@example.com", "app-password")
+
+    def select(self, label, readonly=False):
+        assert readonly  # the crawler never changes the mailbox
+        return ("OK", [b"1"]) if label == '"job-alerts"' else ("NO", [b"no such label"])
+
+    def search(self, charset, *criteria):
+        assert criteria[0] == "SINCE"
+        return "OK", [b"1"]
+
+    def fetch(self, number, parts):
+        return "OK", [(b"1 (RFC822)", self.EMAIL)]
+
+
+def test_imap_source_scores_alert_jobs_and_fetches_allowed_pages(web, laya, monkeypatch):
+    routes, _ = web
+    routes["https://www.linkedin.com/robots.txt"] = httpx.Response(200, text="User-agent: *\nDisallow: /")
+    routes["https://open.example/jobs/9"] = httpx.Response(
+        200, text="<html><title>Automation Engineer</title><body><main><p>Python automation.</p></main></body></html>",
+        headers={"content-type": "text/html"})
+    monkeypatch.setattr(crawl.imaplib, "IMAP4_SSL", FakeMailbox)
+    monkeypatch.setattr(crawl.alerts, "alert_items", lambda message: [
+        ("https://www.linkedin.com/jobs/view/123", {"source_url": "https://www.linkedin.com/jobs/view/123",
+         "title": "Python Developer", "company": "Acme", "description": "Python role from the alert.", "warnings": []}),
+        ("https://open.example/jobs/9", {"source_url": "https://open.example/jobs/9", "title": "from the email",
+         "description": "snippet", "warnings": []}),
+    ])
+    write_sources([{"kind": "imap", "label": "job-alerts", "max_runs_per_day": 9}])
+    monkeypatch.delenv("IMAP_USER", raising=False)
+    assert crawl.run() == 1 and "IMAP_USER and IMAP_PASSWORD" in db.last_run()["errors"][0]
+    monkeypatch.setenv("IMAP_USER", "me@example.com")
+    monkeypatch.setenv("IMAP_PASSWORD", "app-password")
+    assert crawl.run() == 0
+    assert titles() == ["Automation Engineer", "Python Developer"]  # LinkedIn from the email, the other page fetched
+    assert crawl.run() == 0 and db.last_run()["new_items"] == 0  # the next run adds nothing
+
+
+def test_imap_source_with_an_unknown_label_is_an_error(web, laya, monkeypatch):
+    monkeypatch.setattr(crawl.imaplib, "IMAP4_SSL", FakeMailbox)
+    monkeypatch.setenv("IMAP_USER", "me@example.com")
+    monkeypatch.setenv("IMAP_PASSWORD", "app-password")
+    write_sources([{"kind": "imap", "label": "typo"}])
+    assert crawl.run() == 1 and "no mail label called 'typo'" in db.last_run()["errors"][0]
